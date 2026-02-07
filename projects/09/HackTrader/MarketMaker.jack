@@ -1,0 +1,277 @@
+/**
+ * MarketMaker - Player's market making state and P&L tracking.
+ *
+ * Manages the player's position, average entry price, realized and
+ * unrealized P&L, and quote parameters (bid/ask prices, size, spread).
+ *
+ * The player acts as a market maker: quoting bid and ask prices
+ * around the current mid, earning the spread on round-trip trades,
+ * while managing inventory risk from directional exposure.
+ *
+ * Price convention: all prices fixed-point x10.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class MarketMaker {
+    field int position;       // Net position (positive=long, negative=short)
+    field int avgEntryPrice;  // Volume-weighted avg entry price (x10)
+    field int realizedPnL;    // Closed P&L from completed trades (x10)
+    field int bidPrice;       // Current bid quote (x10)
+    field int askPrice;       // Current ask quote (x10)
+    field int quoteSize;      // Quantity quoted at each level
+    field int spreadWidth;    // Half-spread from mid (x10, min=MIN_SPREAD)
+    field int totalFills;     // Number of fills received
+    field int maxPosition;    // Position limit (absolute value)
+
+    // --- Spread/Size Limits ---
+    static int SPREAD_TICK;       // Amount spread changes per W/N press (x10)
+    static int MAX_SPREAD;        // Maximum half-spread width (x10)
+    static int MIN_SPREAD;        // Minimum half-spread width (x10)
+    static int MAX_QUOTE_SIZE;    // Maximum quote size per level
+    static int MIN_QUOTE_SIZE;    // Minimum quote size per level
+
+    /**
+     * Constructs a MarketMaker with initial parameters.
+     *
+     * @param initSpread Initial half-spread (x10, e.g., 10 = 1.0)
+     * @param initSize Initial quote size per level
+     * @param posLimit Maximum allowed position (absolute)
+     */
+    constructor MarketMaker new(int initSpread, int initSize, int posLimit) {
+        let SPREAD_TICK = 5;
+        let MAX_SPREAD = 50;
+        let MIN_SPREAD = 5;
+        let MAX_QUOTE_SIZE = 10;
+        let MIN_QUOTE_SIZE = 1;
+
+        let position = 0;
+        let avgEntryPrice = 0;
+        let realizedPnL = 0;
+        let bidPrice = 0;
+        let askPrice = 0;
+        let quoteSize = initSize;
+        let spreadWidth = initSpread;
+        let totalFills = 0;
+        let maxPosition = posLimit;
+        return this;
+    }
+
+    /** Disposes this MarketMaker. */
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Updates bid/ask quotes centered around the given mid price.
+     * Applies the current spread width to determine levels.
+     *
+     * @param midPrice Current market mid price (x10)
+     */
+    method void updateQuotes(int midPrice) {
+        let bidPrice = midPrice - spreadWidth;
+        let askPrice = midPrice + spreadWidth;
+
+        // Ensure bid < ask (spread is positive)
+        if (bidPrice < 0) {
+            let bidPrice = 0;
+        }
+        return;
+    }
+
+    /**
+     * Overflow-safe weighted average price calculation.
+     * Computes (oldPos * oldAvg + aq * ap) / (oldPos + aq)
+     * without intermediate overflow by dividing each term by np first.
+     */
+    method int safeWeightedAvg(int oldPos, int oldAvg, int aq, int ap) {
+        var int np;
+        var int tO;
+        var int tN;
+        var int rO;
+        var int rN;
+
+        let np = oldPos + aq;
+        if (np = 0) {
+            return ap;
+        }
+        let tO = oldPos * (oldAvg / np);
+        let rO = oldAvg - ((oldAvg / np) * np);
+        let tO = tO + ((oldPos * rO) / np);
+        let tN = aq * (ap / np);
+        let rN = ap - ((ap / np) * np);
+        let tN = tN + ((aq * rN) / np);
+        return tO + tN;
+    }
+
+    /**
+     * Overflow-safe P&L: pq * pd / 10 using divide-first approach.
+     */
+    method int safePnL(int pq, int pd) {
+        var int w;
+        var int r;
+
+        let w = pd / 10;
+        let r = pd - (w * 10);
+        return (pq * w) + ((pq * r) / 10);
+    }
+
+    method void onFill(int price, int qty, boolean isBuy) {
+        var int prevPosition;
+        var int closeQty;
+
+        let totalFills = totalFills + 1;
+        let prevPosition = position;
+
+        if (isBuy) {
+            // We bought: position increases
+            if (position < 0) {
+                // Closing short: realize P&L
+                if (qty > (-position)) {
+                    // Partial close + new long
+                    let closeQty = -position;
+                    let realizedPnL = realizedPnL + safePnL(closeQty, avgEntryPrice - price);
+                    let avgEntryPrice = price;
+                    let position = position + qty;
+                } else {
+                    // Full or partial close of short
+                    let realizedPnL = realizedPnL + safePnL(qty, avgEntryPrice - price);
+                    let position = position + qty;
+                    if (position = 0) {
+                        let avgEntryPrice = 0;
+                    }
+                }
+            } else {
+                // Adding to long or opening new long
+                if (position = 0) {
+                    let avgEntryPrice = price;
+                } else {
+                    // Overflow-safe weighted average
+                    let avgEntryPrice = safeWeightedAvg(position, avgEntryPrice, qty, price);
+                }
+                let position = position + qty;
+            }
+        } else {
+            // We sold: position decreases
+            if (position > 0) {
+                // Closing long: realize P&L
+                if (qty > position) {
+                    // Partial close + new short
+                    let closeQty = position;
+                    let realizedPnL = realizedPnL + safePnL(closeQty, price - avgEntryPrice);
+                    let avgEntryPrice = price;
+                    let position = position - qty;
+                } else {
+                    // Full or partial close of long
+                    let realizedPnL = realizedPnL + safePnL(qty, price - avgEntryPrice);
+                    let position = position - qty;
+                    if (position = 0) {
+                        let avgEntryPrice = 0;
+                    }
+                }
+            } else {
+                // Adding to short or opening new short
+                if (position = 0) {
+                    let avgEntryPrice = price;
+                } else {
+                    // Overflow-safe weighted average for shorts
+                    let avgEntryPrice = safeWeightedAvg(-position, avgEntryPrice, qty, price);
+                }
+                let position = position - qty;
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Widens the spread by one tick (0.5 = 5 in x10).
+     * Wider spread = less fills but more profit per fill.
+     */
+    method void widenSpread() {
+        let spreadWidth = spreadWidth + SPREAD_TICK;
+        if (spreadWidth > MAX_SPREAD) {
+            let spreadWidth = MAX_SPREAD;
+        }
+        return;
+    }
+
+    /**
+     * Narrows the spread by one tick (0.5 = 5 in x10).
+     * Narrower spread = more fills but less profit per fill.
+     */
+    method void narrowSpread() {
+        let spreadWidth = spreadWidth - SPREAD_TICK;
+        if (spreadWidth < MIN_SPREAD) {
+            let spreadWidth = MIN_SPREAD;
+        }
+        return;
+    }
+
+    /** Increases quote size by 1. */
+    method void increaseSize() {
+        let quoteSize = quoteSize + 1;
+        if (quoteSize > MAX_QUOTE_SIZE) {
+            let quoteSize = MAX_QUOTE_SIZE;
+        }
+        return;
+    }
+
+    /** Decreases quote size by 1. */
+    method void decreaseSize() {
+        let quoteSize = quoteSize - 1;
+        if (quoteSize < MIN_QUOTE_SIZE) {
+            let quoteSize = MIN_QUOTE_SIZE;
+        }
+        return;
+    }
+
+    /**
+     * Computes unrealized P&L based on current market price.
+     * For longs: (currentPrice - avgEntry) * position / 10
+     * For shorts: (avgEntry - currentPrice) * |position| / 10
+     *
+     * @param currentPrice Current market price (x10)
+     * @return Unrealized P&L (x10)
+     */
+    method int getUnrealizedPnL(int currentPrice) {
+        if (position = 0) {
+            return 0;
+        }
+        if (position > 0) {
+            return safePnL(position, currentPrice - avgEntryPrice);
+        }
+        // Short position
+        return safePnL(-position, avgEntryPrice - currentPrice);
+    }
+
+    /**
+     * Returns total P&L (realized + unrealized).
+     * @param currentPrice Current market price (x10)
+     */
+    method int getTotalPnL(int currentPrice) {
+        return realizedPnL + getUnrealizedPnL(currentPrice);
+    }
+
+    /** Returns true if position exceeds the limit. */
+    method boolean isOverLimit() {
+        if (position > maxPosition) {
+            return true;
+        }
+        if (position < (-maxPosition)) {
+            return true;
+        }
+        return false;
+    }
+
+    // --- Getters ---
+
+    method int getPosition() { return position; }
+    method int getAvgEntryPrice() { return avgEntryPrice; }
+    method int getRealizedPnL() { return realizedPnL; }
+    method int getBidPrice() { return bidPrice; }
+    method int getAskPrice() { return askPrice; }
+    method int getQuoteSize() { return quoteSize; }
+    method int getSpreadWidth() { return spreadWidth; }
+    method int getTotalFills() { return totalFills; }
+}

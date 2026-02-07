@@ -1,0 +1,150 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Sys.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * A library that supports various program execution services.
+ *
+ * Implementation:
+ * - Manages OS initialization sequence (critical ordering)
+ * - Provides halt, wait, and error handling
+ * - wait() uses calibrated busy loops
+ *
+ * Initialization order (dependencies):
+ * 1. Memory - needed for all allocations
+ * 2. Math - needed for multiply/divide operations
+ * 3. Screen - needed for Output
+ * 4. Output - needed for text display
+ * 5. Keyboard - can now function fully
+ * 6. Main.main() - user program
+ * 7. halt() - prevents fall-through
+ */
+class Sys {
+    /**
+     * Performs all the initializations required by the OS.
+     * Calls Main.main() and halts when done.
+     *
+     * CRITICAL: The order of init calls matters!
+     * - Memory must be first (Array.new, etc. need it)
+     * - Math must be before anything using multiply/divide
+     * - Screen before Output (Output draws to screen)
+     * - Output before Keyboard (readChar echoes via Output)
+     *
+     * Time: O(sum of all init times)
+     */
+    function void init() {
+        // Initialize OS classes in dependency order
+        do Memory.init();   // First: enables allocations
+        do Math.init();     // Second: enables arithmetic
+        do Screen.init();   // Third: enables graphics
+        do Output.init();   // Fourth: enables text output
+        do Keyboard.init(); // Fifth: enables input
+
+        // Run user program
+        do Main.main();
+
+        // Prevent fall-through after Main returns
+        do Sys.halt();
+        return;
+    }
+
+    /**
+     * Halts the program execution.
+     * Enters an infinite loop that never returns.
+     *
+     * Time: infinite (never returns)
+     */
+    function void halt() {
+        while (true) {
+            // Infinite loop - never exit
+        }
+        return;  // Unreachable, but Jack syntax requires it
+    }
+
+    /**
+     * Waits approximately duration milliseconds and returns.
+     *
+     * Implementation: Calibrated busy loop.
+     * The iteration count is tuned for the VM Emulator.
+     * Actual timing varies by hardware/emulator speed.
+     *
+     * Nested loop structure:
+     * - Outer loop: duration iterations (one per millisecond)
+     * - Inner loop: calibration iterations per millisecond
+     *
+     * @param duration Wait time in milliseconds (must be > 0)
+     *
+     * Time: O(duration × calibration)
+     *
+     * Error: Sys.error(1) if duration <= 0
+     */
+    function void wait(int duration) {
+        var int i, j;
+
+        // Validate duration
+        if (duration < 1) {
+            do Sys.error(1);
+            return;
+        }
+
+        // Outer loop: one iteration per millisecond (approximately)
+        let i = 0;
+        while (i < duration) {
+            // Inner loop: calibrated for ~1ms on VM Emulator
+            // This value may need tuning: try 50-200 for different emulators
+            let j = 0;
+            while (j < 100) {
+                let j = j + 1;
+            }
+            let i = i + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Displays the given error code in the form "ERR<errorCode>",
+     * and halts the program's execution.
+     *
+     * Error codes (standard Jack OS):
+     *   1  - Sys.wait: duration <= 0
+     *   2  - Array.new: size <= 0
+     *   3  - Math.divide: division by zero
+     *   4  - Math.sqrt: negative argument
+     *   5  - Memory.alloc: size <= 0
+     *   6  - Memory.alloc: heap overflow (out of memory)
+     *   7  - Screen.drawPixel: coordinates out of bounds
+     *   8  - Screen.drawLine: coordinates out of bounds
+     *   9  - Screen.drawRectangle: coordinates out of bounds
+     *   12 - Screen.drawCircle: radius < 0
+     *   13 - Screen.drawCircle: radius > 181
+     *   14 - String.new: maxLength < 0
+     *   15 - String.charAt: index out of bounds
+     *   16 - String.setCharAt: index out of bounds
+     *   17 - String.appendChar: string full
+     *   18 - String.eraseLastChar: string empty
+     *   19 - String.setInt: insufficient capacity
+     *   20 - Output.moveCursor: position out of bounds
+     *
+     * @param errorCode Error code to display
+     *
+     * Time: O(digits in errorCode), then halts
+     */
+    function void error(int errorCode) {
+        // Print "ERR" (zero allocation - direct character output)
+        do Output.printChar(69);  // 'E'
+        do Output.printChar(82);  // 'R'
+        do Output.printChar(82);  // 'R'
+
+        // Print the error code
+        do Output.printInt(errorCode);
+
+        // Halt the system
+        do Sys.halt();
+        return;
+    }
+}

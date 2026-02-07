@@ -1,0 +1,27 @@
+[package]
+name = "jack-analyzer"
+version = "1.0.4"
+edition = "2024"
+rust-version = "1.92"
+authors = ["nand2tetris"]
+description = "Syntax analyzer for the Jack programming language"
+license = "MIT"
+
+[dependencies]
+thiserror = "2.0"
+rayon = "1.10"
+clap = { version = "4.5", features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tempfile = "3.14"
+proptest = "1.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "JackAnalyzer"
+path = "src/main.rs"

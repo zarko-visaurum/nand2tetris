@@ -1,0 +1,95 @@
+# Multi-stage Containerfile for jack-compiler
+# Produces a minimal Alpine-based production image (~12MB)
+
+# ==============================================================================
+# Stage 1: Builder
+# ==============================================================================
+FROM rust:1.92-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig
+
+# Set working directory
+WORKDIR /build
+
+# Copy jack-analyzer dependency first (for caching)
+COPY ../10/jack-analyzer /build/jack-analyzer
+
+# Copy source code
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+
+# Build release binary
+RUN cargo build --release --locked
+
+# Run tests in builder (exclude integration tests that need external .jack files)
+RUN cargo test --release --lib --bins
+
+# Verify binary
+RUN ./target/release/JackCompiler --help || true
+
+# ==============================================================================
+# Stage 2: Runtime
+# ==============================================================================
+FROM alpine:latest
+
+# Create non-root user for security
+RUN addgroup -g 1000 jackuser && \
+    adduser -D -u 1000 -G jackuser jackuser
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/JackCompiler /usr/local/bin/JackCompiler
+
+# Set ownership
+RUN chown jackuser:jackuser /usr/local/bin/JackCompiler && \
+    chmod +x /usr/local/bin/JackCompiler
+
+# Switch to non-root user
+USER jackuser
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Set volume for input/output files
+VOLUME ["/workspace"]
+
+# Set entrypoint
+ENTRYPOINT ["JackCompiler"]
+
+# Default command (show help)
+CMD ["--help"]
+
+# ==============================================================================
+# Metadata
+# ==============================================================================
+LABEL maintainer="nand2tetris student"
+LABEL version="1.0.0"
+LABEL description="Full Jack to VM code compiler with optimizations"
+LABEL project="nand2tetris Project 11"
+
+# ==============================================================================
+# Build Instructions
+# ==============================================================================
+# Build image:
+#   podman build -t jack-compiler:1.0.0 -f Containerfile .
+#
+# Run container:
+#   podman run --rm -v $(pwd):/workspace jack-compiler:1.0.0 Main.jack
+#
+# Interactive shell:
+#   podman run --rm -it -v $(pwd):/workspace --entrypoint /bin/sh jack-compiler:1.0.0
+#
+# Directory mode (multiple .jack files -> VM output):
+#   podman run --rm -v $(pwd):/workspace jack-compiler:1.0.0 /workspace/Square/
+#
+# Single file mode:
+#   podman run --rm -v $(pwd):/workspace jack-compiler:1.0.0 Main.jack
+#
+# Disable optimization:
+#   podman run --rm -v $(pwd):/workspace jack-compiler:1.0.0 --no-optimize Main.jack
+#
+# Expected image size: ~12MB (Alpine base + static binary)
+# ==============================================================================

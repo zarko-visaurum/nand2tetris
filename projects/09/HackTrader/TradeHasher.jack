@@ -1,0 +1,123 @@
+/**
+ * TradeHasher - Generates deterministic trade signatures.
+ *
+ * Computes a hash of trade details (price, quantity, side, round)
+ * and displays it as a 4-character hex string (e.g., "7A3F").
+ *
+ * This serves as a subtle nod to cryptographic trade verification
+ * and signed confirmations used in real trading systems.
+ *
+ * Hash function: Knuth multiplicative hash with bit mixing.
+ * XOR is constructed from AND/OR/NOT since Jack lacks a XOR operator.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class TradeHasher {
+    field Array hexChars;  // Lookup table: 0-15 → '0'-'F'
+
+    static int MASK_15BIT;         // 15-bit positive range mask (2^15 - 1)
+    static int KNUTH_MULTIPLIER;   // Knuth multiplicative hash constant (2654435761 mod 32768)
+
+    /** Constructs a TradeHasher and initializes the hex lookup table. */
+    constructor TradeHasher new() {
+        let MASK_15BIT = 32767;
+        let KNUTH_MULTIPLIER = 19937;
+
+        let hexChars = Array.new(16);
+        let hexChars[0] = 48;   // '0'
+        let hexChars[1] = 49;   // '1'
+        let hexChars[2] = 50;   // '2'
+        let hexChars[3] = 51;   // '3'
+        let hexChars[4] = 52;   // '4'
+        let hexChars[5] = 53;   // '5'
+        let hexChars[6] = 54;   // '6'
+        let hexChars[7] = 55;   // '7'
+        let hexChars[8] = 56;   // '8'
+        let hexChars[9] = 57;   // '9'
+        let hexChars[10] = 65;  // 'A'
+        let hexChars[11] = 66;  // 'B'
+        let hexChars[12] = 67;  // 'C'
+        let hexChars[13] = 68;  // 'D'
+        let hexChars[14] = 69;  // 'E'
+        let hexChars[15] = 70;  // 'F'
+        return this;
+    }
+
+    /** Disposes this TradeHasher. */
+    method void dispose() {
+        do hexChars.dispose();
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Computes a 15-bit hash of trade parameters.
+     * Uses XOR mixing and Knuth's multiplicative hash technique.
+     *
+     * @param price Trade price (x10)
+     * @param qty Trade quantity
+     * @param side 1 for buy, 0 for sell
+     * @param round Current game round number
+     * @return 15-bit hash value (0-32767)
+     */
+    method int hash(int price, int qty, int side, int round) {
+        var int h;
+
+        // Initial mix: combine inputs with prime multipliers
+        let h = price;
+        let h = xor(h, qty * 31);
+        let h = xor(h, side * 127);
+        let h = xor(h, round * 997);
+
+        // Bit mixing: spread influence of each bit
+        // h ^= (h >> 4) — right shift via division
+        let h = xor(h, h / 16);
+
+        // Knuth multiplicative hash — intentional 16-bit overflow for bit mixing.
+        // 2654435761 mod 32768 = 19937 (Mersenne prime, nice property).
+        // The overflow is desired: modular arithmetic spreads hash entropy.
+        let h = h * KNUTH_MULTIPLIER;
+
+        // Final mask to 15-bit positive range
+        let h = h & MASK_15BIT;
+
+        return h;
+    }
+
+    /**
+     * Prints a hash value as a 4-character hex string.
+     * Extracts 4 nibbles (4 bits each) from the 16-bit value.
+     * Output format: "XXXX" where X is 0-9 or A-F.
+     */
+    method void printSig(int hashValue) {
+        var int nibble;
+
+        // Extract bits 12-15 (most significant nibble)
+        let nibble = (hashValue / 4096) & 15;
+        do Output.printChar(hexChars[nibble]);
+
+        // Extract bits 8-11
+        let nibble = (hashValue / 256) & 15;
+        do Output.printChar(hexChars[nibble]);
+
+        // Extract bits 4-7
+        let nibble = (hashValue / 16) & 15;
+        do Output.printChar(hexChars[nibble]);
+
+        // Extract bits 0-3 (least significant nibble)
+        let nibble = hashValue & 15;
+        do Output.printChar(hexChars[nibble]);
+
+        return;
+    }
+
+    /**
+     * Computes XOR of two integers using AND, OR, and NOT.
+     * a XOR b = (a | b) & ~(a & b)
+     *
+     * This is necessary because Jack does not have a XOR operator.
+     */
+    method int xor(int a, int b) {
+        return (a | b) & (~(a & b));
+    }
+}

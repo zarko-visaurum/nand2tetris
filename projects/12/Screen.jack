@@ -1,0 +1,489 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Screen.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * A library of functions for displaying graphics on the screen.
+ * The Hack physical screen consists of 256 rows (indexed 0..255, top to bottom)
+ * of 512 pixels each (indexed 0..511, left to right). The top left pixel on
+ * the screen is indexed (0,0).
+ *
+ * Implementation:
+ * - Pre-computed bit masks for O(1) pixel operations
+ * - Bresenham's line algorithm (integer arithmetic only)
+ * - Optimized horizontal line with word-aligned fills
+ * - Midpoint circle algorithm with symmetric fill
+ *
+ * Memory layout:
+ * - Screen base: 16384 (0x4000)
+ * - 32 words per row (512 pixels / 16 bits)
+ * - Total: 8192 words (256 rows × 32 words)
+ */
+class Screen {
+    // Screen memory constants
+    static int SCREEN_BASE;     // 16384
+    static int SCREEN_WIDTH;    // 512 pixels
+    static int SCREEN_HEIGHT;   // 256 pixels
+    static int WORDS_PER_ROW;   // 32
+
+    // Drawing state
+    static boolean color;       // true = black, false = white
+
+    // Pre-computed bit masks for O(1) pixel manipulation
+    static Array bitMasks;      // bitMasks[i] = 2^i (single bit set)
+
+    /**
+     * Initializes the Screen.
+     * Pre-computes bit masks for O(1) pixel manipulation.
+     *
+     * Time: O(16)
+     * Space: 16 words for masks
+     */
+    function void init() {
+        var int i, mask;
+
+        let SCREEN_BASE = 16384;
+        let SCREEN_WIDTH = 512;
+        let SCREEN_HEIGHT = 256;
+        let WORDS_PER_ROW = 32;
+
+        let color = true;  // Default: black
+
+        // Pre-compute bit masks using addition (avoid multiply)
+        let bitMasks = Array.new(16);
+        let mask = 1;
+        let i = 0;
+        while (i < 16) {
+            let bitMasks[i] = mask;
+            let mask = mask + mask;  // Left shift
+            let i = i + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Erases the entire screen (sets all pixels to white).
+     *
+     * Time: O(8192) = O(SCREEN_SIZE)
+     */
+    function void clearScreen() {
+        var int addr;
+
+        let addr = SCREEN_BASE;
+        while (addr < 24576) {  // 16384 + 8192
+            do Memory.poke(addr, 0);  // All white
+            let addr = addr + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Sets the current color, to be used for all subsequent drawXXX commands.
+     * Black is represented by true, white by false.
+     */
+    function void setColor(boolean b) {
+        let color = b;
+        return;
+    }
+
+    /**
+     * Draws the (x,y) pixel, using the current color.
+     *
+     * Screen memory layout:
+     * - Address = SCREEN_BASE + (y * 32) + (x / 16)
+     * - Bit position = x mod 16 = x & 15
+     *
+     * @param x Horizontal coordinate (0-511)
+     * @param y Vertical coordinate (0-255)
+     *
+     * Time: O(1)
+     *
+     * Error: Sys.error(7) if coordinates out of bounds
+     */
+    function void drawPixel(int x, int y) {
+        var int address, bitIndex, currentWord;
+
+        // Bounds check
+        if ((x < 0) | (x > 511) | (y < 0) | (y > 255)) {
+            do Sys.error(7);
+            return;
+        }
+
+        // Calculate memory address: base + y*32 + x/16
+        let address = SCREEN_BASE + (y * WORDS_PER_ROW) + (x / 16);
+        let bitIndex = x & 15;  // x mod 16
+
+        let currentWord = Memory.peek(address);
+
+        if (color) {
+            // Set bit (black pixel)
+            let currentWord = currentWord | bitMasks[bitIndex];
+        } else {
+            // Clear bit (white pixel)
+            let currentWord = currentWord & (~bitMasks[bitIndex]);
+        }
+
+        do Memory.poke(address, currentWord);
+        return;
+    }
+
+    /**
+     * Draws a line from pixel (x1,y1) to pixel (x2,y2), using the current color.
+     *
+     * Algorithm: Bresenham's line algorithm (integer arithmetic only).
+     * Special cases: horizontal and vertical lines are optimized.
+     *
+     * @param x1, y1 Start point
+     * @param x2, y2 End point
+     *
+     * Time: O(max(|dx|, |dy|))
+     * Space: O(1)
+     *
+     * Error: Sys.error(8) if coordinates out of bounds
+     */
+    function void drawLine(int x1, int y1, int x2, int y2) {
+        var int dx, dy, sx, sy;
+        var int err, e2;
+        var int temp;
+
+        // Bounds check
+        if ((x1 < 0) | (x1 > 511) | (y1 < 0) | (y1 > 255)) {
+            do Sys.error(8);
+            return;
+        }
+        if ((x2 < 0) | (x2 > 511) | (y2 < 0) | (y2 > 255)) {
+            do Sys.error(8);
+            return;
+        }
+
+        // Optimization: horizontal line
+        if (y1 = y2) {
+            // Ensure x1 <= x2
+            if (x1 > x2) {
+                let temp = x1;
+                let x1 = x2;
+                let x2 = temp;
+            }
+            do Screen.drawHorizontalLine(x1, x2, y1);
+            return;
+        }
+
+        // Optimization: vertical line
+        if (x1 = x2) {
+            // Ensure y1 <= y2
+            if (y1 > y2) {
+                let temp = y1;
+                let y1 = y2;
+                let y2 = temp;
+            }
+            while (~(y1 > y2)) {
+                do Screen.drawPixel(x1, y1);
+                let y1 = y1 + 1;
+            }
+            return;
+        }
+
+        // General case: Bresenham's algorithm
+        if (x2 > x1) {
+            let dx = x2 - x1;
+            let sx = 1;
+        } else {
+            let dx = x1 - x2;
+            let sx = -1;
+        }
+
+        if (y2 > y1) {
+            let dy = y2 - y1;
+            let sy = 1;
+        } else {
+            let dy = y1 - y2;
+            let sy = -1;
+        }
+
+        let err = dx - dy;
+
+        while (true) {
+            do Screen.drawPixel(x1, y1);
+
+            // Check if reached endpoint
+            if ((x1 = x2) & (y1 = y2)) {
+                return;
+            }
+
+            let e2 = err + err;  // 2 * err
+
+            if (e2 > (-dy)) {
+                let err = err - dy;
+                let x1 = x1 + sx;
+            }
+
+            if (e2 < dx) {
+                let err = err + dx;
+                let y1 = y1 + sy;
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Optimized horizontal line drawing.
+     * Fills entire 16-bit words where possible for 16x speedup.
+     *
+     * @param x1 Left x coordinate (must be <= x2)
+     * @param x2 Right x coordinate
+     * @param y Y coordinate
+     */
+    function void drawHorizontalLine(int x1, int x2, int y) {
+        var int startWord, endWord, startBit, endBit;
+        var int baseAddr, addr, word, mask;
+
+        // Calculate word boundaries
+        let startWord = x1 / 16;
+        let endWord = x2 / 16;
+        let startBit = x1 & 15;
+        let endBit = x2 & 15;
+
+        // Base address for this row
+        let baseAddr = SCREEN_BASE + (y * WORDS_PER_ROW);
+
+        // Case 1: Line fits in single word
+        if (startWord = endWord) {
+            // Build mask for bits startBit to endBit
+            let mask = Screen.buildMask(startBit, endBit);
+            let addr = baseAddr + startWord;
+            let word = Memory.peek(addr);
+
+            if (color) {
+                let word = word | mask;
+            } else {
+                let word = word & (~mask);
+            }
+
+            do Memory.poke(addr, word);
+            return;
+        }
+
+        // Case 2: Line spans multiple words
+
+        // Draw partial first word (if not aligned)
+        if (startBit > 0) {
+            let mask = Screen.buildMask(startBit, 15);
+            let addr = baseAddr + startWord;
+            let word = Memory.peek(addr);
+
+            if (color) {
+                let word = word | mask;
+            } else {
+                let word = word & (~mask);
+            }
+
+            do Memory.poke(addr, word);
+            let startWord = startWord + 1;
+        }
+
+        // Draw full middle words
+        while (startWord < endWord) {
+            if (color) {
+                do Memory.poke(baseAddr + startWord, -1);  // All bits set (0xFFFF = -1)
+            } else {
+                do Memory.poke(baseAddr + startWord, 0);   // All bits clear
+            }
+            let startWord = startWord + 1;
+        }
+
+        // Draw partial last word
+        let mask = Screen.buildMask(0, endBit);
+        let addr = baseAddr + endWord;
+        let word = Memory.peek(addr);
+
+        if (color) {
+            let word = word | mask;
+        } else {
+            let word = word & (~mask);
+        }
+
+        do Memory.poke(addr, word);
+        return;
+    }
+
+    /**
+     * Builds a bit mask with bits from startBit to endBit set (inclusive).
+     *
+     * @param startBit First bit to set (0-15)
+     * @param endBit Last bit to set (0-15), must be >= startBit
+     * @return Mask with specified bits set
+     */
+    function int buildMask(int startBit, int endBit) {
+        var int mask, i;
+
+        let mask = 0;
+        let i = startBit;
+        while (~(i > endBit)) {
+            let mask = mask | bitMasks[i];
+            let i = i + 1;
+        }
+
+        return mask;
+    }
+
+    /**
+     * Draws a filled rectangle whose top left corner is (x1, y1)
+     * and bottom right corner is (x2,y2), using the current color.
+     *
+     * Optimization: Uses horizontal line routine which fills
+     * entire words where possible.
+     *
+     * Time: O(height × width/16) best case (word-aligned)
+     *
+     * Error: Sys.error(9) if coordinates invalid
+     */
+    function void drawRectangle(int x1, int y1, int x2, int y2) {
+        var int temp, y;
+
+        // Bounds check
+        if ((x1 < 0) | (x1 > 511) | (y1 < 0) | (y1 > 255)) {
+            do Sys.error(9);
+            return;
+        }
+        if ((x2 < 0) | (x2 > 511) | (y2 < 0) | (y2 > 255)) {
+            do Sys.error(9);
+            return;
+        }
+
+        // Normalize coordinates (ensure x1 <= x2, y1 <= y2)
+        if (x1 > x2) {
+            let temp = x1;
+            let x1 = x2;
+            let x2 = temp;
+        }
+        if (y1 > y2) {
+            let temp = y1;
+            let y1 = y2;
+            let y2 = temp;
+        }
+
+        // Draw horizontal lines
+        let y = y1;
+        while (~(y > y2)) {
+            do Screen.drawHorizontalLine(x1, x2, y);
+            let y = y + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Draws a filled circle of radius r<=181 around (x,y), using the current color.
+     *
+     * Algorithm: Midpoint circle algorithm (Bresenham for circles).
+     * Computes one octant, reflects to all 8 octants.
+     * Fills by drawing horizontal lines.
+     *
+     * Constraint: r <= 181 (since r² must fit in 15 bits: 181² = 32761)
+     *
+     * @param cx, cy Center coordinates
+     * @param r Radius (0 to 181)
+     *
+     * Time: O(r) for perimeter calculation, O(r²) for fill
+     * Space: O(1)
+     *
+     * Error: Sys.error(12) if r < 0
+     * Error: Sys.error(13) if r > 181
+     */
+    function void drawCircle(int cx, int cy, int r) {
+        var int x, y, d;
+
+        // Validate radius
+        if (r < 0) {
+            do Sys.error(12);
+            return;
+        }
+        if (r > 181) {
+            do Sys.error(13);
+            return;
+        }
+
+        // Special case: radius 0 is just a point
+        if (r = 0) {
+            do Screen.drawPixel(cx, cy);
+            return;
+        }
+
+        // Midpoint circle algorithm (filled version)
+        let x = 0;
+        let y = r;
+        let d = 1 - r;  // Initial decision variable
+
+        // Draw initial symmetric lines
+        do Screen.drawSymmetricLines(cx, cy, x, y);
+
+        while (x < y) {
+            if (d < 0) {
+                // Midpoint is inside circle, go East
+                let d = d + x + x + 3;  // d + 2x + 3
+            } else {
+                // Midpoint is outside circle, go Southeast
+                let d = d + x + x - y - y + 5;  // d + 2x - 2y + 5
+                let y = y - 1;
+            }
+            let x = x + 1;
+
+            do Screen.drawSymmetricLines(cx, cy, x, y);
+        }
+
+        return;
+    }
+
+    /**
+     * Draws 4 horizontal lines to fill circle symmetrically.
+     * Given point (x, y) in the first octant, draws lines at
+     * y-offsets ±x and ±y from center.
+     */
+    function void drawSymmetricLines(int cx, int cy, int dx, int dy) {
+        // Lines at y ± dy (with x-extent ±dx)
+        do Screen.drawHorizontalLineClipped(cx - dx, cx + dx, cy - dy);
+        do Screen.drawHorizontalLineClipped(cx - dx, cx + dx, cy + dy);
+
+        // Lines at y ± dx (with x-extent ±dy) - avoid duplicate when dx = dy
+        if (~(dx = dy)) {
+            do Screen.drawHorizontalLineClipped(cx - dy, cx + dy, cy - dx);
+            do Screen.drawHorizontalLineClipped(cx - dy, cx + dy, cy + dx);
+        }
+
+        return;
+    }
+
+    /**
+     * Draws horizontal line with coordinate clipping.
+     * Silently clips to screen bounds instead of erroring.
+     */
+    function void drawHorizontalLineClipped(int x1, int x2, int y) {
+        // Clip y
+        if ((y < 0) | (y > 255)) {
+            return;
+        }
+
+        // Clip x coordinates
+        if (x1 < 0) {
+            let x1 = 0;
+        }
+        if (x2 > 511) {
+            let x2 = 511;
+        }
+
+        // Ensure x1 <= x2
+        if (x1 > x2) {
+            return;
+        }
+
+        do Screen.drawHorizontalLine(x1, x2, y);
+        return;
+    }
+}

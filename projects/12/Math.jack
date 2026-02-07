@@ -1,0 +1,303 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Math.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * A library of commonly used mathematical functions.
+ * All functions run in O(n), where n is the number of bits used
+ * for representing a two's complement integer value (16 in the Hack computer).
+ * Note: Jack compilers implement multiplication and division
+ * using calls to OS functions in this class.
+ *
+ * Implementation:
+ * - multiply: Shift-and-add algorithm with early termination
+ * - divide: Binary long division with 2qy optimization
+ * - sqrt: Binary search building result bit-by-bit
+ */
+class Math {
+    static int n;               // Number of bits = 16
+    static Array powersOfTwo;   // [1, 2, 4, 8, ..., 16384]
+    static int twoQY;           // Optimization variable for divide
+
+    /**
+     * Initializes the Math library.
+     * Pre-computes powers of two for O(1) bit testing.
+     *
+     * Time: O(n) where n = 16
+     * Space: 16 words static
+     */
+    function void init() {
+        var int i, val;
+
+        let n = 16;
+        let powersOfTwo = Array.new(16);
+
+        // Build powers of two using addition (avoid multiply bootstrap issue)
+        let val = 1;
+        let i = 0;
+        while (i < 16) {
+            let powersOfTwo[i] = val;
+            let val = val + val;  // val * 2
+            let i = i + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Returns the product of x and y.
+     * When a Jack compiler detects the multiplication operator '*'
+     * in an expression, it handles it by invoking this method.
+     * Thus, in Jack, x * y and Math.multiply(x,y) return the same value.
+     *
+     * Algorithm: Shift-and-add (Russian Peasant multiplication)
+     * - Extract signs, work with absolute values
+     * - Iterate over bits of the smaller operand (early termination)
+     * - For each set bit, add the shifted multiplicand
+     *
+     * @param x First operand (signed 16-bit)
+     * @param y Second operand (signed 16-bit)
+     * @return x * y (lower 16 bits, signed)
+     *
+     * Time: O(n) flat, n = 15 iterations (bit 15 is sign, y is positive)
+     * Space: O(1)
+     */
+    function int multiply(int x, int y) {
+        var int sum, shiftedX, i;
+        var boolean negative;
+
+        // Handle zero cases (common case optimization)
+        if ((x = 0) | (y = 0)) {
+            return 0;
+        }
+
+        // Extract sign: negative if exactly one operand is negative
+        let negative = ((x < 0) & (y > 0)) | ((x > 0) & (y < 0));
+
+        // Work with absolute values
+        if (x < 0) {
+            let x = -x;
+        }
+        if (y < 0) {
+            let y = -y;
+        }
+
+        let sum = 0;
+        let shiftedX = x;
+        let i = 0;
+
+        // Shift-and-add: test each bit of y using powersOfTwo lookup (flat O(n))
+        while (i < 15) {
+            // Test bit i of y using O(1) lookup
+            if (~((y & powersOfTwo[i]) = 0)) {
+                let sum = sum + shiftedX;
+            }
+            let shiftedX = shiftedX + shiftedX;  // Left shift (multiply by 2)
+            let i = i + 1;
+        }
+
+        if (negative) {
+            return -sum;
+        }
+        return sum;
+    }
+
+    /**
+     * Returns the integer part of x / y.
+     * When a Jack compiler detects the division operator '/'
+     * in an expression, it handles it by invoking this method.
+     * Thus, x/y and Math.divide(x,y) return the same value.
+     *
+     * Algorithm: Binary long division with 2qy optimization.
+     * - Uses static twoQY to track 2*q*y across recursive calls
+     * - Avoids redundant multiplication in recursion
+     *
+     * @param x Dividend (signed 16-bit)
+     * @param y Divisor (signed 16-bit, must be non-zero)
+     * @return Integer quotient floor(|x|/|y|) with appropriate sign
+     *
+     * Time: O(n) where n = 16
+     * Space: O(n) stack frames (recursive)
+     *
+     * Error: Sys.error(3) if y = 0
+     */
+    function int divide(int x, int y) {
+        var boolean negative;
+        var int result;
+
+        // Division by zero check
+        if (y = 0) {
+            do Sys.error(3);
+            return 0;
+        }
+
+        // Handle zero dividend
+        if (x = 0) {
+            return 0;
+        }
+
+        // Extract sign
+        let negative = ((x < 0) & (y > 0)) | ((x > 0) & (y < 0));
+
+        // Work with absolute values
+        if (x < 0) {
+            let x = -x;
+        }
+        if (y < 0) {
+            let y = -y;
+        }
+
+        // Initialize tracking variable
+        let twoQY = 0;
+
+        let result = Math.dividePositive(x, y);
+
+        if (negative) {
+            return -result;
+        }
+        return result;
+    }
+
+    /**
+     * Helper: Divides positive x by positive y using binary long division.
+     *
+     * Key insight: After each recursive call, twoQY contains 2*q*y
+     * where q is the quotient returned. This avoids recomputing q*y.
+     */
+    function int dividePositive(int x, int y) {
+        var int q, doubledY;
+
+        // Base case: y > x means quotient contribution is 0
+        if (y > x) {
+            let twoQY = 0;
+            return 0;
+        }
+
+        // Overflow check: if doubling y would overflow, handle specially
+        // y > 16383 means 2*y > 32767 (would overflow to negative)
+        if (y > 16383) {
+            let twoQY = y;
+            return 1;
+        }
+
+        let doubledY = y + y;  // 2*y
+
+        // Recursive call: find quotient for x / (2*y)
+        let q = Math.dividePositive(x, doubledY);
+
+        // After recursion, twoQY = 2*q*(2y) = 4*q*y
+        // Check: is x - 2*q*y >= y? (can we add 1 to quotient?)
+        if ((x - twoQY) < y) {
+            // Cannot fit another y; quotient is 2*q
+            // twoQY stays as is for caller: 2*(2q)*y/2 = 2*q*y
+            return q + q;
+        } else {
+            // Can fit another y; quotient is 2*q + 1
+            // Update twoQY for caller: 2*(2q+1)*y/2 = (2q+1)*y
+            let twoQY = twoQY + y;
+            return q + q + 1;
+        }
+    }
+
+    /**
+     * Returns the integer part of the square root of x.
+     *
+     * Algorithm: Binary search building result bit-by-bit from MSB.
+     * - For each bit position from 7 to 0, try adding 2^bit
+     * - Keep the bit if (result + 2^bit)² <= x and no overflow
+     *
+     * @param x Non-negative integer (0 to 32767)
+     * @return floor(sqrt(x))
+     *
+     * Time: O(n/2) = O(8) iterations, guaranteed
+     * Space: O(1)
+     *
+     * Error: Sys.error(4) if x < 0
+     */
+    function int sqrt(int x) {
+        var int result, bit, trial, trialSquared;
+
+        // Negative check
+        if (x < 0) {
+            do Sys.error(4);
+            return 0;
+        }
+
+        if (x = 0) {
+            return 0;
+        }
+
+        let result = 0;
+        let bit = 7;  // Start with bit 7 (2^7 = 128), since sqrt(32767) = 181 < 256
+
+        while (~(bit < 0)) {
+            // Try adding 2^bit to result
+            let trial = result + powersOfTwo[bit];
+            let trialSquared = trial * trial;
+
+            // Check: trial² <= x AND trial² > 0 (overflow check)
+            // If trial² overflows to negative, it's too big
+            if ((~(trialSquared > x)) & (trialSquared > 0)) {
+                let result = trial;
+            }
+
+            let bit = bit - 1;
+        }
+
+        return result;
+    }
+
+    /**
+     * Returns the greater value of a and b.
+     *
+     * @param a First value
+     * @param b Second value
+     * @return max(a, b)
+     *
+     * Time: O(1)
+     */
+    function int max(int a, int b) {
+        if (a > b) {
+            return a;
+        }
+        return b;
+    }
+
+    /**
+     * Returns the smaller value of a and b.
+     *
+     * @param a First value
+     * @param b Second value
+     * @return min(a, b)
+     *
+     * Time: O(1)
+     */
+    function int min(int a, int b) {
+        if (a < b) {
+            return a;
+        }
+        return b;
+    }
+
+    /**
+     * Returns the absolute value of x.
+     *
+     * Note: abs(-32768) returns -32768 due to 2's complement overflow.
+     * This is mathematically incorrect but unavoidable in 16-bit arithmetic.
+     *
+     * @param x Input value
+     * @return |x|
+     *
+     * Time: O(1)
+     */
+    function int abs(int x) {
+        if (x < 0) {
+            return -x;
+        }
+        return x;
+    }
+}

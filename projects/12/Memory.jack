@@ -1,0 +1,242 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Memory.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * This library provides two services: direct access to the computer's main
+ * memory (RAM), and allocation and recycling of memory blocks. The Hack RAM
+ * consists of 32,768 words, each holding a 16-bit binary number.
+ *
+ * Implementation: First-fit allocation with block coalescing.
+ * - Uses the "array trick": setting memory=0 allows memory[addr] to access RAM[addr]
+ * - Free list is address-sorted for efficient coalescing
+ * - Block format: [size][next_ptr or user_data...]
+ *
+ * Memory map:
+ *   0-15:       Virtual registers
+ *   16-255:     Static variables
+ *   256-2047:   Stack
+ *   2048-16383: Heap (14,336 words)
+ *   16384-24575: Screen
+ *   24576:      Keyboard
+ */
+class Memory {
+    // Memory access via "array trick"
+    static Array memory;
+
+    // Free list management
+    static int freeList;
+
+    // Constants (initialized in init)
+    static int HEAP_BASE;       // 2048
+    static int HEAP_END;        // 16383
+    static int SIZE_OFFSET;     // 0 - offset to size field in block
+    static int NEXT_OFFSET;     // 1 - offset to next pointer in free block
+    static int HEADER_SIZE;     // 1 - words of overhead per allocated block
+    static int MIN_BLOCK_SIZE;  // 2 - minimum free block size (size + next)
+
+    /**
+     * Initializes the Memory class.
+     * Sets up the heap as a single large free block.
+     *
+     * Time: O(1)
+     */
+    function void init() {
+        // Initialize constants
+        let HEAP_BASE = 2048;
+        let HEAP_END = 16383;
+        let SIZE_OFFSET = 0;
+        let NEXT_OFFSET = 1;
+        let HEADER_SIZE = 1;
+        let MIN_BLOCK_SIZE = 2;
+
+        // The "array trick": memory[addr] accesses RAM[addr]
+        let memory = 0;
+
+        // Initialize free list: one block covering entire heap
+        let freeList = HEAP_BASE;
+        let memory[freeList + SIZE_OFFSET] = HEAP_END - HEAP_BASE + 1;  // 14336 words
+        let memory[freeList + NEXT_OFFSET] = 0;  // null (end of list)
+
+        return;
+    }
+
+    /**
+     * Returns the RAM value at the given address.
+     *
+     * @param address RAM address (0 to 32767)
+     * @return Value at RAM[address]
+     *
+     * Time: O(1)
+     */
+    function int peek(int address) {
+        return memory[address];
+    }
+
+    /**
+     * Sets the RAM value at the given address to the given value.
+     *
+     * @param address RAM address (0 to 32767)
+     * @param value Value to store
+     *
+     * Time: O(1)
+     */
+    function void poke(int address, int value) {
+        let memory[address] = value;
+        return;
+    }
+
+    /**
+     * Finds an available RAM block of the given size and returns
+     * a reference to its base address.
+     *
+     * Algorithm: First-fit search with block splitting.
+     * - Searches free list for first block >= size + HEADER_SIZE
+     * - Splits block if remainder >= MIN_BLOCK_SIZE
+     * - Returns pointer to user data area (skips size header)
+     *
+     * @param size Number of words requested (must be > 0)
+     * @return Pointer to allocated block (user data area)
+     *
+     * Time: O(n) where n = number of free blocks
+     * Space: O(1)
+     *
+     * Error: Sys.error(5) if size <= 0
+     * Error: Sys.error(6) if heap exhausted
+     */
+    function int alloc(int size) {
+        var int current, prev, blockSize, allocSize, remaining, newBlock;
+
+        // Validate size
+        if (size < 1) {
+            do Sys.error(5);
+            return 0;
+        }
+
+        // Total space needed: size + header
+        let allocSize = size + HEADER_SIZE;
+
+        // First-fit search through free list
+        let current = freeList;
+        let prev = 0;
+
+        while (~(current = 0)) {
+            let blockSize = memory[current + SIZE_OFFSET];
+
+            if (~(blockSize < allocSize)) {
+                // Found a suitable block (blockSize >= allocSize)
+                let remaining = blockSize - allocSize;
+
+                if (~(remaining < MIN_BLOCK_SIZE)) {
+                    // Split: create new free block from remainder
+                    let newBlock = current + allocSize;
+                    let memory[newBlock + SIZE_OFFSET] = remaining;
+                    let memory[newBlock + NEXT_OFFSET] = memory[current + NEXT_OFFSET];
+
+                    // Update current block size
+                    let memory[current + SIZE_OFFSET] = allocSize;
+
+                    // Update free list linkage
+                    if (prev = 0) {
+                        let freeList = newBlock;
+                    } else {
+                        let memory[prev + NEXT_OFFSET] = newBlock;
+                    }
+                } else {
+                    // Use entire block (no split) - remove from free list
+                    if (prev = 0) {
+                        let freeList = memory[current + NEXT_OFFSET];
+                    } else {
+                        let memory[prev + NEXT_OFFSET] = memory[current + NEXT_OFFSET];
+                    }
+                }
+
+                // Return pointer to user data (skip size header)
+                return current + HEADER_SIZE;
+            }
+
+            // Move to next free block
+            let prev = current;
+            let current = memory[current + NEXT_OFFSET];
+        }
+
+        // No suitable block found
+        do Sys.error(6);
+        return 0;
+    }
+
+    /**
+     * De-allocates the given object (cast as an array) by making
+     * it available for future allocations.
+     *
+     * Algorithm: Insert into address-sorted free list with coalescing.
+     * - Finds correct position in sorted list
+     * - Attempts to merge with previous and next blocks
+     *
+     * @param o Pointer previously returned by alloc
+     *
+     * Time: O(n) where n = number of free blocks
+     * Space: O(1)
+     */
+    function void deAlloc(Array o) {
+        var int block, blockSize, blockEnd;
+        var int current, prev;
+        var int prevEnd, nextBlock;
+
+        // Get actual block start (user pointer - header)
+        let block = o - HEADER_SIZE;
+        let blockSize = memory[block + SIZE_OFFSET];
+        let blockEnd = block + blockSize;
+
+        // Find insertion point (keep list sorted by address for coalescing)
+        let current = freeList;
+        let prev = 0;
+
+        while ((~(current = 0)) & (current < block)) {
+            let prev = current;
+            let current = memory[current + NEXT_OFFSET];
+        }
+
+        // Now: prev < block < current (or prev/current may be 0)
+
+        // Insert block into list
+        if (prev = 0) {
+            // Block becomes new head of free list
+            let freeList = block;
+            let memory[block + NEXT_OFFSET] = current;
+        } else {
+            // Insert between prev and current
+            let memory[prev + NEXT_OFFSET] = block;
+            let memory[block + NEXT_OFFSET] = current;
+        }
+
+        // Try coalesce with previous block
+        if (~(prev = 0)) {
+            let prevEnd = prev + memory[prev + SIZE_OFFSET];
+            if (prevEnd = block) {
+                // Coalesce: extend prev's size, bypass newly freed block
+                let memory[prev + SIZE_OFFSET] = memory[prev + SIZE_OFFSET] + blockSize;
+                let memory[prev + NEXT_OFFSET] = current;
+                // Update block reference for next coalesce check
+                let block = prev;
+                let blockSize = memory[block + SIZE_OFFSET];
+                let blockEnd = block + blockSize;
+            }
+        }
+
+        // Try coalesce with next block
+        if (~(current = 0)) {
+            if (blockEnd = current) {
+                // Coalesce: extend block's size, skip current
+                let memory[block + SIZE_OFFSET] = blockSize + memory[current + SIZE_OFFSET];
+                let memory[block + NEXT_OFFSET] = memory[current + NEXT_OFFSET];
+            }
+        }
+
+        return;
+    }
+}

@@ -1,0 +1,93 @@
+# Multi-stage Containerfile for vm-translator
+# Produces a minimal Alpine-based production image (~12MB)
+
+# ==============================================================================
+# Stage 1: Builder
+# ==============================================================================
+FROM rust:1.92-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+
+# Build release binary
+RUN cargo build --release --locked
+
+# Run tests in builder (exclude integration tests that need external .vm files)
+RUN cargo test --release --lib --bins
+RUN cargo test --release --test fuzz_test
+
+# Verify binary
+RUN ./target/release/vm-translator --help || true
+
+# ==============================================================================
+# Stage 2: Runtime
+# ==============================================================================
+FROM alpine:latest
+
+# Create non-root user for security
+RUN addgroup -g 1000 vmuser && \
+    adduser -D -u 1000 -G vmuser vmuser
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/vm-translator /usr/local/bin/vm-translator
+
+# Set ownership
+RUN chown vmuser:vmuser /usr/local/bin/vm-translator && \
+    chmod +x /usr/local/bin/vm-translator
+
+# Switch to non-root user
+USER vmuser
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Set volume for input/output files
+VOLUME ["/workspace"]
+
+# Set entrypoint
+ENTRYPOINT ["vm-translator"]
+
+# Default command (show help)
+CMD ["--help"]
+
+# ==============================================================================
+# Metadata
+# ==============================================================================
+LABEL maintainer="nand2tetris student"
+LABEL version="2.0.1"
+LABEL description="Full VM-to-Hack translator with branching and function calls"
+LABEL project="nand2tetris Project 08"
+
+# ==============================================================================
+# Build Instructions
+# ==============================================================================
+# Build image:
+#   podman build -t vm-translator:2.0.1 -f Containerfile .
+#
+# Run container:
+#   podman run --rm -v $(pwd):/workspace vm-translator:2.0.1 input.vm
+#
+# Interactive shell:
+#   podman run --rm -it -v $(pwd):/workspace --entrypoint /bin/sh vm-translator:2.0.1
+#
+# Directory mode (multiple .vm files -> single .asm with bootstrap):
+#   podman run --rm -v $(pwd):/workspace vm-translator:2.0.1 /workspace/FunctionCalls/
+#
+# Single file mode:
+#   podman run --rm -v $(pwd):/workspace vm-translator:2.0.1 SimpleAdd.vm
+#
+# Verbose mode:
+#   podman run --rm -v $(pwd):/workspace vm-translator:2.0.1 -v input.vm
+#
+# Expected image size: ~12MB (Alpine base + static binary)
+# ==============================================================================

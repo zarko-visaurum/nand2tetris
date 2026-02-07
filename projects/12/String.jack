@@ -1,0 +1,315 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/String.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * Represents character strings. In addition for constructing and disposing
+ * strings, the class features methods for getting and setting individual
+ * characters of the string, for erasing the string's last character,
+ * for appending a character to the string's end, and more typical
+ * string-oriented operations.
+ *
+ * Implementation:
+ * - Mutable string with fixed maximum capacity
+ * - intValue: left-to-right parsing with sign handling
+ * - setInt: recursive digit extraction (avoids reversal)
+ * - Special case: -32768 handled directly (cannot be negated)
+ */
+class String {
+    field Array chars;      // Character storage
+    field int len;          // Current length (0 to maxLen)
+    field int maxLen;       // Maximum capacity
+
+    /**
+     * Constructs a new empty string with a maximum length of maxLength
+     * and initial length of 0.
+     *
+     * @param maxLength Maximum capacity (>= 0)
+     * @return New String object
+     *
+     * Note: maxLength=0 is valid (empty string that cannot grow)
+     *
+     * Error: Sys.error(14) if maxLength < 0
+     */
+    constructor String new(int maxLength) {
+        if (maxLength < 0) {
+            do Sys.error(14);
+            return this;
+        }
+
+        let maxLen = maxLength;
+        let len = 0;
+
+        if (maxLength > 0) {
+            let chars = Array.new(maxLength);
+        } else {
+            let chars = null;  // No storage needed for empty string
+        }
+
+        return this;
+    }
+
+    /**
+     * Disposes this string.
+     * Frees the character array and the string object itself.
+     */
+    method void dispose() {
+        if (~(chars = null)) {
+            do chars.dispose();
+        }
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Returns the current length of this string.
+     *
+     * @return Number of characters (0 to maxLength)
+     *
+     * Time: O(1)
+     */
+    method int length() {
+        return len;
+    }
+
+    /**
+     * Returns the character at the j-th location of this string.
+     *
+     * @param j Index (0 to length-1)
+     * @return Character code at position j
+     *
+     * Time: O(1)
+     *
+     * Error: Sys.error(15) if j out of bounds
+     */
+    method char charAt(int j) {
+        if ((j < 0) | (~(j < len))) {
+            do Sys.error(15);
+            return 0;
+        }
+        return chars[j];
+    }
+
+    /**
+     * Sets the character at the j-th location of this string to c.
+     *
+     * @param j Index (0 to length-1)
+     * @param c Character code to set
+     *
+     * Time: O(1)
+     *
+     * Error: Sys.error(16) if j out of bounds
+     */
+    method void setCharAt(int j, char c) {
+        if ((j < 0) | (~(j < len))) {
+            do Sys.error(16);
+            return;
+        }
+        let chars[j] = c;
+        return;
+    }
+
+    /**
+     * Appends c to this string's end and returns this string.
+     *
+     * @param c Character code to append
+     * @return this (for method chaining)
+     *
+     * Time: O(1)
+     *
+     * Error: Sys.error(17) if string is full
+     */
+    method String appendChar(char c) {
+        if (~(len < maxLen)) {
+            do Sys.error(17);
+            return this;
+        }
+        let chars[len] = c;
+        let len = len + 1;
+        return this;
+    }
+
+    /**
+     * Erases the last character from this string.
+     *
+     * Time: O(1)
+     *
+     * Error: Sys.error(18) if string is empty
+     */
+    method void eraseLastChar() {
+        if (len = 0) {
+            do Sys.error(18);
+            return;
+        }
+        let len = len - 1;
+        return;
+    }
+
+    /**
+     * Returns the integer value of this string,
+     * until a non-digit character is detected.
+     *
+     * Algorithm:
+     * - Check for leading minus sign
+     * - Parse digits left-to-right: result = result*10 + digit
+     * - Stop at first non-digit
+     *
+     * @return Integer value, or 0 if no valid digits
+     *
+     * Examples:
+     *   "456" -> 456
+     *   "-32123" -> -32123
+     *   "12abc" -> 12
+     *   "abc" -> 0
+     *
+     * Time: O(length)
+     */
+    method int intValue() {
+        var int i, result, digit, c;
+        var boolean negative;
+
+        let result = 0;
+        let i = 0;
+        let negative = false;
+
+        // Check for leading minus sign
+        if (len > 0) {
+            if (chars[0] = 45) {  // '-'
+                let negative = true;
+                let i = 1;
+            }
+        }
+
+        // Parse digits left to right
+        while (i < len) {
+            let c = chars[i];
+
+            // Check if digit (ASCII 48-57 = '0'-'9')
+            if ((~(c < 48)) & (~(c > 57))) {
+                let digit = c - 48;
+                let result = (result * 10) + digit;
+                let i = i + 1;
+            } else {
+                // Non-digit: stop parsing
+                let i = len;  // Exit loop
+            }
+        }
+
+        if (negative) {
+            return -result;
+        }
+        return result;
+    }
+
+    /**
+     * Sets this string to hold a representation of the given value.
+     *
+     * Algorithm:
+     * - Handle sign (prepend '-' for negative)
+     * - Special case: -32768 cannot be negated, output directly
+     * - Use recursive helper to output digits in correct order
+     *
+     * @param val Integer to convert
+     *
+     * Time: O(number of digits) = O(5) for 16-bit
+     *
+     * Error: Sys.error(19) if string too short
+     */
+    method void setInt(int val) {
+        // Clear string
+        let len = 0;
+
+        // Handle negative
+        if (val < 0) {
+            // Special case: -32768 cannot be negated (overflow)
+            if (val = (-32767 - 1)) {
+                // Output "-32768" directly
+                do appendCharSafe(45);   // '-'
+                do appendCharSafe(51);   // '3'
+                do appendCharSafe(50);   // '2'
+                do appendCharSafe(55);   // '7'
+                do appendCharSafe(54);   // '6'
+                do appendCharSafe(56);   // '8'
+                return;
+            }
+
+            do appendCharSafe(45);  // '-'
+            let val = -val;
+        }
+
+        // Handle zero explicitly
+        if (val = 0) {
+            do appendCharSafe(48);  // '0'
+            return;
+        }
+
+        // Use recursive helper to output digits in correct order
+        do setIntHelper(val);
+        return;
+    }
+
+    /**
+     * Helper: Recursively appends digits of positive integer.
+     * Recursion ensures digits come out in correct order (MSD first).
+     */
+    method void setIntHelper(int val) {
+        var int quotient, remainder, digitChar;
+
+        let quotient = val / 10;
+        let remainder = val - (quotient * 10);  // val mod 10
+
+        // Recurse for higher-order digits first
+        if (quotient > 0) {
+            do setIntHelper(quotient);
+        }
+
+        // Append this digit
+        let digitChar = 48 + remainder;  // '0' + digit
+        do appendCharSafe(digitChar);
+        return;
+    }
+
+    /**
+     * Helper: Append character with error on overflow.
+     */
+    method void appendCharSafe(char c) {
+        if (~(len < maxLen)) {
+            do Sys.error(19);
+            return;
+        }
+        let chars[len] = c;
+        let len = len + 1;
+        return;
+    }
+
+    /**
+     * Returns the new line character.
+     *
+     * @return 128 (Hack newline code)
+     */
+    function char newLine() {
+        return 128;
+    }
+
+    /**
+     * Returns the backspace character.
+     *
+     * @return 129 (Hack backspace code)
+     */
+    function char backSpace() {
+        return 129;
+    }
+
+    /**
+     * Returns the double quote (") character.
+     *
+     * @return 34 (ASCII double quote)
+     */
+    function char doubleQuote() {
+        return 34;
+    }
+}

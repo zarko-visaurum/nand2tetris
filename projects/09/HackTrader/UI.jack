@@ -1,0 +1,760 @@
+/**
+ * UI - User Interface rendering for HackTrader.
+ *
+ * Handles all screen output: order book depth chart, options payoff curve,
+ * Greeks display, position panel, trade log, and control instructions.
+ *
+ * Screen layout (23 rows x 64 columns text mode):
+ *   Row 0:      Title bar
+ *   Row 1-11:   Left: Order book depth | Right: Payoff curve + Greeks
+ *   Row 12-16:  Left: Position info    | Right: Trade log
+ *   Row 17-18:  Controls and round info
+ *   Row 19-22:  Status messages and educational info
+ *
+ * Uses Output library for text and Screen library for graphical elements
+ * (depth bars, payoff curve).
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class UI {
+    field Array tradeHashes;   // Hash values for trade log entries
+    field Array tradePrices;   // Prices for trade log
+    field Array tradeQtys;     // Quantities for trade log
+    field Array tradeSides;    // Sides for trade log (1=buy, 0=sell)
+    field int tradeLogCount;   // Number of entries in log
+    field int tradeLogHead;    // Next write position (circular)
+    static int LOG_SIZE;       // Maximum trade log entries displayed
+
+    // Pre-allocated label strings (avoid per-tick allocation)
+    field String sPos;
+    field String sAvg;
+    field String sUPnl;
+    field String sRPnl;
+    field String sBid;
+    field String sAsk;
+    field String sSz;
+    field String sTotPnl;
+    field String sBuy;
+    field String sSell;
+    field String sNoTrades;
+
+    /** Constructs the UI and initializes the trade log buffer. */
+    constructor UI new() {
+        let LOG_SIZE = 4;
+        let tradeHashes = Array.new(LOG_SIZE);
+        let tradePrices = Array.new(LOG_SIZE);
+        let tradeQtys = Array.new(LOG_SIZE);
+        let tradeSides = Array.new(LOG_SIZE);
+        let tradeLogCount = 0;
+        let tradeLogHead = 0;
+
+        // Allocate label strings once
+        let sPos = "Pos:";
+        let sAvg = " Avg:";
+        let sUPnl = "uPnL:";
+        let sRPnl = " rPnL:";
+        let sBid = "Bid:";
+        let sAsk = " Ask:";
+        let sSz = " Sz:";
+        let sTotPnl = "TOTAL PnL: ";
+        let sBuy = "BUY  ";
+        let sSell = "SELL ";
+        let sNoTrades = "No trades yet       ";
+
+        return this;
+    }
+
+    /** Disposes all allocated memory. */
+    method void dispose() {
+        do tradeHashes.dispose();
+        do tradePrices.dispose();
+        do tradeQtys.dispose();
+        do tradeSides.dispose();
+        do sPos.dispose();
+        do sAvg.dispose();
+        do sUPnl.dispose();
+        do sRPnl.dispose();
+        do sBid.dispose();
+        do sAsk.dispose();
+        do sSz.dispose();
+        do sTotPnl.dispose();
+        do sBuy.dispose();
+        do sSell.dispose();
+        do sNoTrades.dispose();
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /** Clears the entire screen. */
+    method void clearScreen() {
+        do Screen.clearScreen();
+        return;
+    }
+
+    /**
+     * Draws the title bar: solid top border, dithered background, title text.
+     */
+    method void drawTitle() {
+        do Screen.setColor(true);
+        // Solid top border (2px)
+        do Screen.drawRectangle(0, 0, 511, 1);
+        // Dithered title background (50% density)
+        do Main.drawDitheredRect(0, 2, 511, 10);
+        // Title text
+        do Output.moveCursor(0, 9);
+        do Output.printString("HACKTRADER - Market Making Sim");
+        // Solid underline below title
+        do Screen.drawLine(0, 12, 511, 12);
+        return;
+    }
+
+    /**
+     * Draws all static labels and graphical dividers.
+     * Call once at game start. Per-tick refresh only updates dynamic values.
+     */
+    method void drawStaticLabels() {
+        var int px;
+
+        do Screen.setColor(true);
+
+        // Vertical divider between left (order book) and right (Greeks) panels
+        do Screen.drawLine(260, 14, 260, 130);
+        do Screen.drawLine(261, 14, 261, 130);
+
+        // Horizontal divider below order book area
+        do Screen.drawLine(0, 131, 511, 131);
+
+        // Horizontal divider above controls
+        do Screen.drawLine(0, 186, 511, 186);
+
+        // Bottom border (2px solid)
+        do Screen.drawRectangle(0, 254, 511, 255);
+
+        // Vertical divider in position/trade log area (double line)
+        do Screen.drawLine(260, 131, 260, 186);
+        do Screen.drawLine(261, 131, 261, 186);
+
+        // Left panel: Order book ASK header
+        do Output.moveCursor(1, 1);
+        do Output.printString("ASK");
+
+        // Spread separator: dithered bar across order book width
+        do Main.drawDithered25(2, 67, 258, 75);
+        do Output.moveCursor(6, 1);
+        do Output.printString("spread:");
+
+        // Last/Vol labels at bottom of order book
+        do Output.moveCursor(11, 0);
+        do Output.printString("Last:        Vol:    ");
+
+        // Right panel: OPTIONS header with dithered background
+        do Main.drawDitheredRect(262, 14, 511, 24);
+        do Output.moveCursor(1, 34);
+        do Output.printString("OPTIONS");
+
+        // Greeks labels with dotted separator lines between them
+        do Output.moveCursor(2, 33);
+        do Output.printString("Call:                ");
+        do Output.moveCursor(3, 33);
+        do Output.printString("K:       S:          ");
+
+        // Dashed line before Greeks section (row 4, centered at y=48)
+        // Draw 6px dashes with 4px gaps, 3px tall for strong visibility
+        let px = 264;
+        while (px < 506) {
+            do Screen.drawRectangle(px, 47, px + 5, 49);
+            let px = px + 10;
+        }
+
+        do Output.moveCursor(5, 33);
+        do Output.printString("Delta:               ");
+        do Output.moveCursor(6, 33);
+        do Output.printString("Gamma:               ");
+        do Output.moveCursor(7, 33);
+        do Output.printString("Theta:               ");
+        do Output.moveCursor(8, 33);
+        do Output.printString("Vega:                ");
+
+        // Position and trade log section headers with dithered backgrounds
+        do Main.drawDitheredRect(0, 132, 259, 142);
+        do Output.moveCursor(12, 2);
+        do Output.printString("YOUR POSITION");
+        do Main.drawDitheredRect(262, 132, 511, 142);
+        do Output.moveCursor(12, 34);
+        do Output.printString("TRADE LOG");
+
+        // Dithered highlight for TOTAL PnL row (row 16: y=176 to y=186)
+        do Main.drawDithered25(0, 176, 259, 185);
+
+        // Controls area with dithered background (25% = light gray)
+        do Main.drawDithered25(0, 187, 511, 208);
+        do Output.moveCursor(17, 0);
+        do Output.printString("[B]uy [S]ell [W]iden [N]arrow");
+        do Output.moveCursor(18, 0);
+        do Output.printString("[+]Size [-]Size [Q]uit   Rd:");
+
+        // Status separator (dotted line below controls)
+        let px = 0;
+        while (px < 511) {
+            do Screen.drawPixel(px, 209);
+            let px = px + 3;
+        }
+
+        return;
+    }
+
+    /**
+     * Draws the order book depth display (rows 1-11, left half).
+     * Only updates dynamic values (prices, quantities, bars).
+     */
+    method void drawOrderBook(OrderBook book) {
+        var int i;
+        var int price;
+        var int qty;
+        var int row;
+
+        // Ask levels (rows 2-5, up to 4 levels, worst to best)
+        let i = 3;
+        let row = 2;
+        while ((i > -1) & (row < 6)) {
+            do Output.moveCursor(row, 0);
+            if (i < book.getAskCount()) {
+                let price = book.getAskPrice(i);
+                let qty = book.getAskQty(i);
+                do printFixedPrice(price);
+                do Output.printChar(58);  // ':'
+                do clearCols(1);
+                do drawBar(row, qty, false);
+            } else {
+                do clearCols(8);
+                do drawBar(row, 0, false);
+            }
+            let i = i - 1;
+            let row = row + 1;
+        }
+
+        // Spread value (row 6, col 10)
+        do Output.moveCursor(6, 10);
+        do printFixedPrice(book.getSpread());
+        do clearCols(4);
+
+        // Bid levels (rows 7-10, best to worst)
+        let i = 0;
+        let row = 7;
+        while ((i < 4) & (row < 11)) {
+            do Output.moveCursor(row, 0);
+            if (i < book.getBidCount()) {
+                let price = book.getBidPrice(i);
+                let qty = book.getBidQty(i);
+                do printFixedPrice(price);
+                do Output.printChar(58);  // ':'
+                do clearCols(1);
+                do drawBar(row, qty, true);
+            } else {
+                do clearCols(8);
+                do drawBar(row, 0, true);
+            }
+            let i = i + 1;
+            let row = row + 1;
+        }
+
+        // Last price value (row 11, col 5) and volume (col 17)
+        do Output.moveCursor(11, 5);
+        do printFixedPrice(book.getLastPrice());
+        do Output.moveCursor(11, 17);
+        do Output.printInt(book.getTotalVolume());
+        do clearCols(3);
+
+        return;
+    }
+
+    /**
+     * Draws Greeks and option info. Only updates dynamic values.
+     * Labels drawn by drawStaticLabels().
+     */
+    method void drawGreeks(OptionsPricer pricer) {
+        // Call price value (row 2, col 39)
+        do Output.moveCursor(2, 39);
+        do printFixedPrice(pricer.getCallPrice());
+        do clearCols(5);
+
+        // K value (row 3, col 35), S value (row 3, col 44)
+        do Output.moveCursor(3, 35);
+        do printFixedPrice(pricer.getStrike());
+        do Output.moveCursor(3, 44);
+        do printFixedPrice(pricer.getSpot());
+        do clearCols(3);
+
+        // Delta value (row 5, col 40)
+        do Output.moveCursor(5, 40);
+        do printSigned(pricer.getDelta());
+        do clearCols(5);
+
+        // Gamma value (row 6, col 40)
+        do Output.moveCursor(6, 40);
+        do Output.printInt(pricer.getGamma());
+        do clearCols(5);
+
+        // Theta value (row 7, col 40)
+        do Output.moveCursor(7, 40);
+        do printSigned(pricer.getTheta());
+        do clearCols(5);
+
+        // Vega value (row 8, col 40)
+        do Output.moveCursor(8, 40);
+        do Output.printInt(pricer.getVega());
+        do clearCols(5);
+
+        return;
+    }
+
+    /**
+     * Draws player position information (rows 12-16, left half).
+     * Uses pre-allocated label strings to avoid per-tick allocation.
+     */
+    method void drawPosition(MarketMaker mm, int spotPrice) {
+        var int unrealPnL;
+        var int totalPnL;
+
+        // Row 13: Pos and Avg
+        do Output.moveCursor(13, 0);
+        do Output.printString(sPos);
+        do printSigned(mm.getPosition());
+        do Output.printString(sAvg);
+        do printFixedPrice(mm.getAvgEntryPrice());
+        do clearCols(4);
+
+        // Row 14: P&L
+        let unrealPnL = mm.getUnrealizedPnL(spotPrice);
+        let totalPnL = mm.getTotalPnL(spotPrice);
+        do Output.moveCursor(14, 0);
+        do Output.printString(sUPnl);
+        do printSignedFixed(unrealPnL);
+        do Output.printString(sRPnl);
+        do printSignedFixed(mm.getRealizedPnL());
+        do clearCols(2);
+
+        // Row 15: Quotes
+        do Output.moveCursor(15, 0);
+        do Output.printString(sBid);
+        do printFixedPrice(mm.getBidPrice());
+        do Output.printString(sAsk);
+        do printFixedPrice(mm.getAskPrice());
+        do Output.printString(sSz);
+        do Output.printInt(mm.getQuoteSize());
+        do clearCols(2);
+
+        // Row 16: Total PnL
+        do Output.moveCursor(16, 0);
+        do Output.printString(sTotPnl);
+        do printSignedFixed(totalPnL);
+        do clearCols(4);
+        // Redraw 25% dither highlight (text clears character backgrounds)
+        do Main.drawDithered25(0, 176, 259, 185);
+
+        return;
+    }
+
+    /**
+     * Adds a trade to the log.
+     */
+    method void addTradeToLog(int price, int qty, boolean isBuy, int hashVal) {
+        let tradePrices[tradeLogHead] = price;
+        let tradeQtys[tradeLogHead] = qty;
+        if (isBuy) {
+            let tradeSides[tradeLogHead] = 1;
+        } else {
+            let tradeSides[tradeLogHead] = 0;
+        }
+        let tradeHashes[tradeLogHead] = hashVal;
+
+        let tradeLogHead = tradeLogHead + 1;
+        if (tradeLogHead = LOG_SIZE) {
+            let tradeLogHead = 0;
+        }
+        if (tradeLogCount < LOG_SIZE) {
+            let tradeLogCount = tradeLogCount + 1;
+        }
+        return;
+    }
+
+    /**
+     * Draws the trade log panel (rows 13-16, right half col 33+).
+     * Header drawn by drawStaticLabels().
+     */
+    method void drawTradeLogPanel(TradeHasher hasher) {
+        var int i;
+        var int idx;
+        var int row;
+        var int startIdx;
+
+        // Show most recent trades
+        if (tradeLogCount = 0) {
+            do Output.moveCursor(13, 33);
+            do Output.printString(sNoTrades);
+            return;
+        }
+
+        // Calculate start index for display
+        if (tradeLogCount < LOG_SIZE) {
+            let startIdx = 0;
+        } else {
+            let startIdx = tradeLogHead;
+        }
+
+        let i = 0;
+        let row = 13;
+        while ((i < tradeLogCount) & (i < LOG_SIZE) & (row < 17)) {
+            let idx = (startIdx + i);
+            if (idx > (LOG_SIZE - 1)) {
+                let idx = idx - LOG_SIZE;
+            }
+
+            do Output.moveCursor(row, 33);
+            if (tradeSides[idx] = 1) {
+                do Output.printString(sBuy);
+            } else {
+                do Output.printString(sSell);
+            }
+            do Output.printInt(tradeQtys[idx]);
+            do Output.printChar(64);  // '@'
+            do printFixedPrice(tradePrices[idx]);
+            do Output.printChar(32);  // ' '
+            do hasher.printSig(tradeHashes[idx]);
+            do Output.printChar(32);  // ' '
+
+            let i = i + 1;
+            let row = row + 1;
+        }
+
+        // Clear remaining rows
+        while (row < 17) {
+            do Output.moveCursor(row, 33);
+            do clearCols(24);
+            let row = row + 1;
+        }
+
+        return;
+    }
+
+    /**
+     * Updates the round counter (row 18, col 28).
+     * Static control labels drawn by drawStaticLabels().
+     */
+    method void drawControls(int round, int totalRounds) {
+        do Output.moveCursor(18, 28);
+        do Output.printInt(round);
+        do Output.printChar(47);  // '/'
+        do Output.printInt(totalRounds);
+        do clearCols(2);
+        return;
+    }
+
+    /**
+     * Displays a status message (row 20).
+     */
+    method void drawStatus(String msg) {
+        do Output.moveCursor(20, 0);
+        do Output.printString(msg);
+        do clearCols(20);
+        return;
+    }
+
+    /**
+     * Displays the game over screen with block letters, stats, and equity curve.
+     * @param pnlHistory Array of P&L values at end of each round
+     */
+    method void drawGameOver(MarketMaker mm, int spotPrice, int round,
+                             Array pnlHistory) {
+        var int totalPnL;
+        let totalPnL = mm.getTotalPnL(spotPrice);
+
+        do Screen.clearScreen();
+        do Screen.setColor(true);
+
+        // Top/bottom borders
+        do Screen.drawRectangle(0, 0, 511, 1);
+        do Screen.drawRectangle(0, 254, 511, 255);
+
+        // "GAME OVER" in block letters (y=10)
+        // 8 letters+space: G,A,M,E,_,O,V,E,R → use 8 letters with wider gap
+        // Each letter 24px wide, 4px gap = 28px per slot
+        // "GAME" = 4*24 + 3*4 = 108px, gap 20px, "OVER" = 4*24 + 3*4 = 108px
+        // Total = 236px, start at (512-236)/2 = 138
+        do Main.drawBlockLetter(138, 10, 71);   // G
+        do Main.drawBlockLetter(166, 10, 65);   // A
+        do Main.drawBlockLetter(194, 10, 77);   // M
+        do Main.drawBlockLetter(222, 10, 69);   // E
+        do Main.drawBlockLetter(270, 10, 79);   // O
+        do Main.drawBlockLetter(298, 10, 86);   // V
+        do Main.drawBlockLetter(326, 10, 69);   // E
+        do Main.drawBlockLetter(354, 10, 82);   // R
+
+        // Stats line (row 5, below block letters which end at y=50)
+        do Output.moveCursor(5, 8);
+        do Output.printString("Rounds:");
+        do Output.printInt(round);
+        do Output.printString("  Fills:");
+        do Output.printInt(mm.getTotalFills());
+        do Output.printString("  Pos:");
+        do printSigned(mm.getPosition());
+        do Output.printString("  rPnL:");
+        do printSignedFixed(mm.getRealizedPnL());
+
+        // Separator line (below row 5 text which ends at y=65)
+        do Screen.drawLine(40, 67, 472, 67);
+
+        // Light dithered background for chart area
+        do Main.drawDithered25(45, 70, 465, 198);
+
+        // Equity curve chart (y=72 to y=197, x=50 to x=460)
+        do drawEquityCurve(pnlHistory, round, 50, 72, 410, 125);
+
+        // Total P&L (row 18)
+        do Output.moveCursor(18, 15);
+        do Output.printString("TOTAL P&L: ");
+        do printSignedFixed(totalPnL);
+        do Output.printString("   ");
+
+        // Performance rating
+        if (totalPnL < 0) {
+            do Output.printString("Blown up! Fired.");
+        } else {
+            if (totalPnL < 50) {
+                do Output.printString("Survived. Barely.");
+            } else {
+                if (totalPnL < 200) {
+                    do Output.printString("Solid. Promoted!");
+                } else {
+                    do Output.printString("LEGEND!");
+                }
+            }
+        }
+
+        // Restart/quit prompt (row 21)
+        do Output.moveCursor(21, 15);
+        do Output.printString("Press R to restart, Q to quit");
+        return;
+    }
+
+    /**
+     * Draws an equity curve line chart from P&L history.
+     * Connects P&L values with lines, draws axes and zero line.
+     * @param pnlHistory Array of P&L values (x10 fixed-point)
+     * @param rounds Number of valid entries
+     * @param cx Chart left x
+     * @param cy Chart top y
+     * @param cw Chart width
+     * @param ch Chart height
+     */
+    method void drawEquityCurve(Array pnlHistory, int rounds, int cx, int cy,
+                                int cw, int ch) {
+        var int i;
+        var int minPnL, maxPnL, pnlRange;
+        var int x1, y1, x2, y2;
+        var int xStep;
+        var int zeroY;
+        var int px;
+
+        if (rounds < 2) {
+            do Output.moveCursor(12, 20);
+            do Output.printString("Not enough data");
+            return;
+        }
+
+        // Find min/max P&L
+        let minPnL = pnlHistory[0];
+        let maxPnL = pnlHistory[0];
+        let i = 1;
+        while (i < rounds) {
+            if (pnlHistory[i] < minPnL) {
+                let minPnL = pnlHistory[i];
+            }
+            if (pnlHistory[i] > maxPnL) {
+                let maxPnL = pnlHistory[i];
+            }
+            let i = i + 1;
+        }
+
+        // Ensure range is at least 10 to avoid division by zero
+        let pnlRange = maxPnL - minPnL;
+        if (pnlRange < 10) {
+            let maxPnL = maxPnL + 5;
+            let minPnL = minPnL - 5;
+            let pnlRange = 10;
+        }
+
+        // X-axis (bottom of chart)
+        do Screen.drawLine(cx, cy + ch, cx + cw, cy + ch);
+        // Y-axis (left of chart)
+        do Screen.drawLine(cx, cy, cx, cy + ch);
+
+        // Zero line (dashed) if zero is within range
+        if ((minPnL < 1) & (maxPnL > -1)) {
+            let zeroY = cy + ch - mapToChart(0 - minPnL, ch, pnlRange);
+            if ((zeroY > cy) & (zeroY < (cy + ch))) {
+                let px = cx + 1;
+                while (px < (cx + cw)) {
+                    do Screen.drawPixel(px, zeroY);
+                    do Screen.drawPixel(px + 1, zeroY);
+                    let px = px + 4;
+                }
+            }
+        }
+
+        // Draw equity curve: connect adjacent points with lines
+        let xStep = cw / rounds;
+        if (xStep < 1) { let xStep = 1; }
+
+        let i = 0;
+        while (i < (rounds - 1)) {
+            let x1 = cx + (i * xStep);
+            let y1 = cy + ch - mapToChart(pnlHistory[i] - minPnL, ch, pnlRange);
+            let x2 = cx + ((i + 1) * xStep);
+            let y2 = cy + ch - mapToChart(pnlHistory[i + 1] - minPnL, ch, pnlRange);
+
+            // Clamp Y values to chart bounds
+            if (y1 < cy) { let y1 = cy; }
+            if (y1 > (cy + ch)) { let y1 = cy + ch; }
+            if (y2 < cy) { let y2 = cy; }
+            if (y2 > (cy + ch)) { let y2 = cy + ch; }
+
+            do Screen.drawLine(x1, y1, x2, y2);
+            let i = i + 1;
+        }
+
+        // Print final P&L value at end of curve
+        let x2 = cx + ((rounds - 1) * xStep) + 3;
+        let y2 = cy + ch - mapToChart(pnlHistory[rounds - 1] - minPnL, ch, pnlRange);
+        if (y2 < cy) { let y2 = cy; }
+        if (y2 > (cy + ch - 11)) { let y2 = cy + ch - 11; }
+        do Output.moveCursor(y2 / 11, x2 / 8);
+        do printSignedFixed(pnlHistory[rounds - 1]);
+
+        return;
+    }
+
+    /**
+     * Maps a value (0 to range) into chart pixel space (0 to height).
+     * Uses overflow-safe 16-bit arithmetic by dividing first when needed.
+     * @param value The offset from min (always >= 0)
+     * @param height Chart height in pixels
+     * @param range Total P&L range
+     * @return Pixel offset (0 to height)
+     */
+    method int mapToChart(int value, int height, int range) {
+        // If value * height would overflow 16-bit (value > 32767/height ≈ 262 for h=125),
+        // divide first: (value / range) * height — loses precision but safe.
+        // Otherwise multiply first: value * height / range — precise.
+        if (value > 250) {
+            return (value / range) * height;
+        }
+        return (value * height) / range;
+    }
+
+    // --- Helper methods for formatted output ---
+
+    /**
+     * Prints a fixed-point x10 price as "XXX.X" format.
+     * Uses printChar to avoid string allocation.
+     */
+    method void printFixedPrice(int price) {
+        var int whole;
+        var int frac;
+
+        if (price < 0) {
+            do Output.printChar(45);  // '-'
+            let price = -price;
+        }
+
+        let whole = price / 10;
+        let frac = price - (whole * 10);
+
+        do Output.printInt(whole);
+        do Output.printChar(46);  // '.'
+        do Output.printInt(frac);
+        return;
+    }
+
+    /** Prints a signed integer with explicit +/- prefix. */
+    method void printSigned(int value) {
+        if (value > 0) {
+            do Output.printChar(43);  // '+'
+            do Output.printInt(value);
+        } else {
+            if (value < 0) {
+                do Output.printInt(value);
+            } else {
+                do Output.printChar(48);  // '0'
+            }
+        }
+        return;
+    }
+
+    /** Prints a signed fixed-point x10 value. */
+    method void printSignedFixed(int value) {
+        if (value > 0) {
+            do Output.printChar(43);  // '+'
+        }
+        do printFixedPrice(value);
+        return;
+    }
+
+    /**
+     * Draws a graphical depth bar for an order book level.
+     * Bid bars are solid filled, ask bars are hollow outlines (border only).
+     * Bar width proportional to quantity (max 8 units = 96px).
+     * @param row Text row number (for Y positioning)
+     * @param qty Quantity to display
+     * @param isBid true = bid (solid), false = ask (hollow)
+     */
+    method void drawBar(int row, int qty, boolean isBid) {
+        var int len;
+        var int barY;
+        var int barX2;
+
+        let len = qty;
+        if (len > 8) {
+            let len = 8;
+        }
+
+        // Bar starts at col 9 (x=72), each unit = 12px wide
+        // Row y: row * 11 + 2 to row * 11 + 9 (8px tall, centered in row)
+        let barY = (row * 11) + 2;
+        let barX2 = 71 + (len * 12);
+
+        // Clear the bar area first (erase previous bar)
+        do Screen.setColor(false);
+        do Screen.drawRectangle(72, barY, 167, barY + 7);
+        do Screen.setColor(true);
+
+        if (len > 0) {
+            if (isBid) {
+                // Solid filled bar for bids
+                do Screen.drawRectangle(72, barY, barX2, barY + 7);
+            } else {
+                // Hollow outline bar for asks (border only, white interior)
+                do Screen.drawRectangle(72, barY, barX2, barY + 7);
+                // Erase interior to create hollow effect
+                if (barX2 > 74) {
+                    do Screen.setColor(false);
+                    do Screen.drawRectangle(74, barY + 2, barX2 - 2, barY + 5);
+                    do Screen.setColor(true);
+                }
+            }
+        }
+
+        return;
+    }
+
+    /** Prints n space characters to clear columns. No string allocation. */
+    method void clearCols(int n) {
+        var int i;
+        let i = 0;
+        while (i < n) {
+            do Output.printChar(32);  // ' '
+            let i = i + 1;
+        }
+        return;
+    }
+}

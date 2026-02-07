@@ -1,0 +1,23 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/1/DMux4Way.hdl
+/**
+ * 4-way demultiplexor:
+ * [a, b, c, d] = [in, 0, 0, 0] if sel = 00
+ *                [0, in, 0, 0] if sel = 01
+ *                [0, 0, in, 0] if sel = 10
+ *                [0, 0, 0, in] if sel = 11
+ */
+CHIP DMux4Way {
+    IN in, sel[2];
+    OUT a, b, c, d;
+
+    PARTS:
+    // Level 1: Use sel[1] to route to first or second pair
+    DMux(in=in, sel=sel[1], a=toAB, b=toCD);
+    
+    // Level 2: Use sel[0] to route within each pair
+    DMux(in=toAB, sel=sel[0], a=a, b=b);
+    DMux(in=toCD, sel=sel[0], a=c, b=d);
+}

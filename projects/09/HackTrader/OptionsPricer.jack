@@ -1,0 +1,486 @@
+/**
+ * OptionsPricer - Black-Scholes Options Pricing in 16-bit Integer Arithmetic
+ *
+ * Computes European call option prices and Greeks (Delta, Gamma, Theta, Vega)
+ * using fixed-point arithmetic and lookup tables.
+ *
+ * Mathematical approach:
+ *   C = S*N(d1) - K*exp(-rT)*N(d2)
+ *   d1 = [ln(S/K) + (r + sigma^2/2)*T] / (sigma*sqrt(T))
+ *   d2 = d1 - sigma*sqrt(T)
+ *
+ * Fixed-point conventions:
+ *   - Prices: x10 (105.5 = 1055)
+ *   - Normal CDF N(x): x256 (0.5 = 128, 1.0 = 256)
+ *   - Volatility: percentage (30 = 30%)
+ *   - Time: ticks remaining (20 = full game, 1 = near expiry)
+ *   - Greeks: delta x100, gamma x1000, theta x10, vega x10
+ *
+ * Key insight: all transcendental functions (exp, ln, sqrt, N(x))
+ * are implemented via pre-computed lookup tables with linear interpolation,
+ * making this feasible on the 16-bit Hack platform.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class OptionsPricer {
+    field Array normalCDF;     // N(x) lookup: x=0.0,0.2,...,4.0 (21 entries, x256)
+    field Array lnTable;       // ln(x) lookup: x=0.7,0.75,...,1.3 (13 entries, x256)
+    field int spotPrice;       // Underlying price (x10)
+    field int strikePrice;     // Strike price (x10)
+    field int volatility;      // Annualized vol as % (e.g., 30)
+    field int timeToExpiry;    // Ticks remaining (game rounds left)
+    field int totalTime;       // Total game length in ticks
+
+    // --- Fixed-Point Scaling Factors ---
+    static int SCALE_CDF;         // Normal CDF output precision (256)
+    static int SCALE_D1;          // d1 intermediate scale (32)
+    static int SCALE_DELTA;       // Delta output 0-100 range (100)
+    static int SCALE_RATIO;       // S/K ratio multiplier (100)
+
+    // --- Computation Divisors ---
+    static int SIGMA_SQ_DENOM;    // sigma^2/2 normalization (200)
+    static int SQRT_T_DIVISOR;    // sigSqrtT = vol * sqrtT / this (6)
+    static int D2_SHIFT_DIVISOR;  // d2 = d1 - sigSqrtT / this (8)
+    static int PDF_DIVISOR;       // nPdf = SCALE_CDF - d1Sq / this (4)
+    static int VEGA_DENOM;        // Vega intermediate divisor (160)
+
+    // --- Output Caps ---
+    static int GAMMA_CAP;         // Maximum gamma value (x1000 scale)
+    static int VEGA_CAP;          // Maximum vega value (x10 scale)
+    static int THETA_FLOOR;       // Minimum theta value (x10 scale)
+
+    // --- Ln Table Lookup Bounds ---
+    static int LN_RATIO_MIN;      // Minimum S/K ratio for table (70 = 0.70)
+    static int LN_RATIO_MAX;      // Maximum S/K ratio for table (129 = 1.29+)
+    static int LN_RATIO_STEP;     // Step size in ln table (5 = 0.05)
+    static int LN_TABLE_MAX_IDX;  // Maximum interpolation index (11)
+
+    // Cached computed values (updated on recalculate)
+    field int cachedCallPrice; // Call option price (x10)
+    field int cachedDelta;     // Delta (x100, range 0-100 for calls)
+    field int cachedGamma;     // Gamma (x1000)
+    field int cachedTheta;     // Theta (x10, negative for long options)
+    field int cachedVega;      // Vega (x10)
+    field int cachedD1;        // d1 value (x32, for internal use)
+
+    /**
+     * Constructs an OptionsPricer with initial parameters.
+     *
+     * @param strike Strike price (x10)
+     * @param vol Volatility percentage (e.g., 30 for 30%)
+     * @param totalTicks Total game rounds (used for T normalization)
+     */
+    constructor OptionsPricer new(int strike, int vol, int totalTicks) {
+        let SCALE_CDF = 256;
+        let SCALE_D1 = 32;
+        let SCALE_DELTA = 100;
+        let SCALE_RATIO = 100;
+        let SIGMA_SQ_DENOM = 200;
+        let SQRT_T_DIVISOR = 6;
+        let D2_SHIFT_DIVISOR = 8;
+        let PDF_DIVISOR = 4;
+        let VEGA_DENOM = 160;
+        let GAMMA_CAP = 999;
+        let VEGA_CAP = 200;
+        let THETA_FLOOR = -100;
+        let LN_RATIO_MIN = 70;
+        let LN_RATIO_MAX = 129;
+        let LN_RATIO_STEP = 5;
+        let LN_TABLE_MAX_IDX = 11;
+
+        let strikePrice = strike;
+        let volatility = vol;
+        let totalTime = totalTicks;
+        let timeToExpiry = totalTicks;
+        let spotPrice = strike;  // Start ATM
+
+        let cachedCallPrice = 0;
+        let cachedDelta = 50;
+        let cachedGamma = 0;
+        let cachedTheta = 0;
+        let cachedVega = 0;
+        let cachedD1 = 0;
+
+        do initNormalCDF();
+        do initLnTable();
+
+        return this;
+    }
+
+    /** Disposes all allocated memory. */
+    method void dispose() {
+        do normalCDF.dispose();
+        do lnTable.dispose();
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Initializes the standard normal CDF lookup table.
+     * N(x) for x = 0.0, 0.2, 0.4, ..., 4.0 (21 entries)
+     * Values scaled by 256 (so N(0)=128, N(4)≈256)
+     *
+     * Source: standard normal distribution table values.
+     */
+    method void initNormalCDF() {
+        let normalCDF = Array.new(21);
+        // N(0.0) = 0.5000 → 128
+        let normalCDF[0] = 128;
+        // N(0.2) = 0.5793 → 148
+        let normalCDF[1] = 148;
+        // N(0.4) = 0.6554 → 168
+        let normalCDF[2] = 168;
+        // N(0.6) = 0.7257 → 186
+        let normalCDF[3] = 186;
+        // N(0.8) = 0.7881 → 202
+        let normalCDF[4] = 202;
+        // N(1.0) = 0.8413 → 215
+        let normalCDF[5] = 215;
+        // N(1.2) = 0.8849 → 226
+        let normalCDF[6] = 226;
+        // N(1.4) = 0.9192 → 235
+        let normalCDF[7] = 235;
+        // N(1.6) = 0.9452 → 242
+        let normalCDF[8] = 242;
+        // N(1.8) = 0.9641 → 247
+        let normalCDF[9] = 247;
+        // N(2.0) = 0.9772 → 250
+        let normalCDF[10] = 250;
+        // N(2.2) = 0.9861 → 252
+        let normalCDF[11] = 252;
+        // N(2.4) = 0.9918 → 254
+        let normalCDF[12] = 254;
+        // N(2.6) = 0.9953 → 255
+        let normalCDF[13] = 255;
+        // N(2.8) = 0.9974 → 255
+        let normalCDF[14] = 255;
+        // N(3.0) = 0.9987 → 256
+        let normalCDF[15] = 256;
+        // N(3.2) through N(4.0) = ~256
+        let normalCDF[16] = 256;
+        let normalCDF[17] = 256;
+        let normalCDF[18] = 256;
+        let normalCDF[19] = 256;
+        let normalCDF[20] = 256;
+        return;
+    }
+
+    /**
+     * Initializes the natural log lookup table.
+     * ln(x) for x = 0.70, 0.75, 0.80, ..., 1.30 (13 entries)
+     * Values scaled by 256 (Q8.8 fixed-point).
+     * Negative values stored as negative integers.
+     */
+    method void initLnTable() {
+        let lnTable = Array.new(13);
+        // ln(0.70) = -0.3567 → -91
+        let lnTable[0] = -91;
+        // ln(0.75) = -0.2877 → -74
+        let lnTable[1] = -74;
+        // ln(0.80) = -0.2231 → -57
+        let lnTable[2] = -57;
+        // ln(0.85) = -0.1625 → -42
+        let lnTable[3] = -42;
+        // ln(0.90) = -0.1054 → -27
+        let lnTable[4] = -27;
+        // ln(0.95) = -0.0513 → -13
+        let lnTable[5] = -13;
+        // ln(1.00) = 0.0000 → 0
+        let lnTable[6] = 0;
+        // ln(1.05) = 0.0488 → 12
+        let lnTable[7] = 12;
+        // ln(1.10) = 0.0953 → 24
+        let lnTable[8] = 24;
+        // ln(1.15) = 0.1398 → 36
+        let lnTable[9] = 36;
+        // ln(1.20) = 0.1823 → 47
+        let lnTable[10] = 47;
+        // ln(1.25) = 0.2231 → 57
+        let lnTable[11] = 57;
+        // ln(1.30) = 0.2624 → 67
+        let lnTable[12] = 67;
+        return;
+    }
+
+
+    /**
+     * Recalculates option price and all Greeks for current parameters.
+     * Call this after spot price or time changes.
+     *
+     * @param spot Current underlying price (x10)
+     * @param ticksLeft Rounds remaining until expiry
+     */
+    method void recalculate(int spot, int ticksLeft) {
+        var int d1x32;     // d1 scaled by 32
+        var int d2x32;     // d2 scaled by 32
+        var int nd1;       // N(d1) scaled by 256
+        var int nd2;       // N(d2) scaled by 256
+        var int sigSqrtT;  // sigma * sqrt(T) scaled by 256
+        var int lnSK;      // ln(S/K) scaled by 256
+        var int tFrac;     // T as fraction of total time (x256)
+        var int sqrtT;     // sqrt(tFrac)
+        var int ratio;     // S/K ratio x100
+        var int index;     // lookup table index
+        var int frac;      // interpolation fraction
+        var int val0;      // table value
+        var int val1;      // next table value
+        var int sigSqT;    // (sigma^2/2)*T term
+        var int numerator; // d1 numerator
+        var int d1Sq;      // d1^2 for PDF approx
+        var int nPdf;      // normal PDF approximation
+
+        let spotPrice = spot;
+        let timeToExpiry = ticksLeft;
+
+        // Handle expiry: intrinsic value only
+        if (ticksLeft < 1) {
+            let timeToExpiry = 1;
+        }
+
+        // T = ticksLeft / totalTime, scaled by SCALE_CDF
+        let tFrac = (timeToExpiry * SCALE_CDF) / totalTime;
+        if (tFrac < 1) {
+            let tFrac = 1;
+        }
+
+        // --- Compute sigSqrtT inline ---
+        let sqrtT = intSqrt(tFrac);
+        let sigSqrtT = (volatility * sqrtT) / SQRT_T_DIVISOR;
+        if (sigSqrtT < 1) {
+            let sigSqrtT = 1;
+        }
+
+        // --- Compute lnSK inline ---
+        let ratio = (spotPrice * SCALE_RATIO) / strikePrice;
+        if (ratio < LN_RATIO_MIN) {
+            let lnSK = lnTable[0];
+        } else {
+            if (ratio > LN_RATIO_MAX) {
+                let lnSK = lnTable[12];
+            } else {
+                let index = (ratio - LN_RATIO_MIN) / LN_RATIO_STEP;
+                if (index > LN_TABLE_MAX_IDX) {
+                    let index = LN_TABLE_MAX_IDX;
+                }
+                let frac = (ratio - LN_RATIO_MIN) - (index * LN_RATIO_STEP);
+                let val0 = lnTable[index];
+                let val1 = lnTable[index + 1];
+                let lnSK = val0 + (((val1 - val0) * frac) / LN_RATIO_STEP);
+            }
+        }
+
+        // --- Compute d1 inline ---
+        let sigSqT = ((volatility * volatility) / SIGMA_SQ_DENOM)
+                     * tFrac / SCALE_CDF;
+        let numerator = lnSK + sigSqT;
+        let d1x32 = (numerator * SCALE_D1) / sigSqrtT;
+        let cachedD1 = d1x32;
+
+        // d2 = d1 - sigma*sqrt(T) (both in x32 scale)
+        let d2x32 = d1x32 - (sigSqrtT / D2_SHIFT_DIVISOR);
+
+        // Look up N(d1) and N(d2) from CDF table
+        let nd1 = lookupNormalCDF(d1x32);
+        let nd2 = lookupNormalCDF(d2x32);
+
+        // Call price = S*N(d1) - K*N(d2)
+        let cachedCallPrice = ((spotPrice * nd1) - (strikePrice * nd2)) / SCALE_CDF;
+        if (cachedCallPrice < 0) {
+            let cachedCallPrice = 0;
+        }
+
+        // Delta = N(d1), scaled to 0-100
+        let cachedDelta = (nd1 * SCALE_DELTA) / SCALE_CDF;
+
+        // --- Compute nPdf (normal PDF at d1) inline for Greeks ---
+        if (d1x32 < 0) {
+            let d1Sq = (-d1x32) * (-d1x32);
+        } else {
+            let d1Sq = d1x32 * d1x32;
+        }
+        let nPdf = SCALE_CDF - (d1Sq / PDF_DIVISOR);
+        if (nPdf < 0) {
+            let nPdf = 0;
+        }
+
+        // Gamma ≈ nPdf / (S * sigSqrtT / SCALE_CDF), scaled x1000
+        if ((spotPrice > 0) & (sigSqrtT > 0)) {
+            let cachedGamma = ((nPdf * SCALE_DELTA) / spotPrice)
+                              * SCALE_CDF / sigSqrtT;
+            if (cachedGamma > GAMMA_CAP) {
+                let cachedGamma = GAMMA_CAP;
+            }
+        } else {
+            let cachedGamma = 0;
+        }
+
+        // Theta ≈ -(spot * nPdf * vol) / (SCALE_CDF * SIGMA_SQ_DENOM)
+        // Divide first to avoid overflow: spot*nPdf can exceed 32767
+        let cachedTheta = -(((spotPrice / SIGMA_SQ_DENOM) * nPdf / SCALE_CDF) * volatility);
+        if (cachedTheta < THETA_FLOOR) {
+            let cachedTheta = THETA_FLOOR;
+        }
+        if (cachedTheta > 0) {
+            let cachedTheta = 0;
+        }
+
+        // Vega ≈ (spot * sqrtT * nPdf) / (SCALE_CDF * VEGA_DENOM_FACTOR)
+        let cachedVega = (spotPrice * sqrtT) / SCALE_CDF;
+        let cachedVega = (cachedVega * nPdf) / VEGA_DENOM;
+        if (cachedVega > VEGA_CAP) {
+            let cachedVega = VEGA_CAP;
+        }
+        if (cachedVega < 0) {
+            let cachedVega = 0;
+        }
+
+        return;
+    }
+
+    /** Returns cached call option price (x10). */
+    method int getCallPrice() {
+        return cachedCallPrice;
+    }
+
+    /** Returns cached delta (0-100 for calls). */
+    method int getDelta() {
+        return cachedDelta;
+    }
+
+    /** Returns cached gamma (x1000). */
+    method int getGamma() {
+        return cachedGamma;
+    }
+
+    /** Returns cached theta (x10, typically negative). */
+    method int getTheta() {
+        return cachedTheta;
+    }
+
+    /** Returns cached vega (x10). */
+    method int getVega() {
+        return cachedVega;
+    }
+
+    /** Returns the strike price (x10). */
+    method int getStrike() {
+        return strikePrice;
+    }
+
+    /** Returns current spot price (x10). */
+    method int getSpot() {
+        return spotPrice;
+    }
+
+    /** Sets a new strike price. */
+    method void setStrike(int strike) {
+        let strikePrice = strike;
+        return;
+    }
+
+    /** Sets volatility (percentage). */
+    method void setVolatility(int vol) {
+        let volatility = vol;
+        return;
+    }
+
+    /**
+     * Looks up N(x) from the normal CDF table.
+     * Input x is in x32 scale (so x=32 means 1.0).
+     * Returns N(x) in x256 scale.
+     *
+     * Uses symmetry: N(-x) = 256 - N(x)
+     */
+    method int lookupNormalCDF(int x32) {
+        var boolean negative;
+        var int absX;
+        var int index;
+        var int frac;
+        var int val0;
+        var int val1;
+        var int result;
+
+        let negative = (x32 < 0);
+        if (negative) {
+            let absX = -x32;
+        } else {
+            let absX = x32;
+        }
+
+        // Table indexed by x in steps of 0.2, x is in x32 scale
+        // 0.2 in x32 = 6.4 ≈ 6
+        // Index = absX / 6 (approx 0.2 steps)
+        let index = absX / 6;
+        if (index > 19) {
+            let index = 19;
+        }
+
+        // Interpolation fraction
+        let frac = absX - (index * 6);  // 0 to 5
+        let val0 = normalCDF[index];
+        let val1 = normalCDF[index + 1];
+
+        let result = val0 + (((val1 - val0) * frac) / 6);
+
+        // Clamp to valid range
+        if (result > 256) {
+            let result = 256;
+        }
+        if (result < 0) {
+            let result = 0;
+        }
+
+        // Apply symmetry for negative x
+        if (negative) {
+            return 256 - result;
+        }
+        return result;
+    }
+
+    /**
+     * Integer square root using Newton-Raphson method.
+     * Returns floor(sqrt(n)).
+     * For n <= 0, returns 0.
+     * Limited to 10 iterations to guarantee termination.
+     */
+    method int intSqrt(int n) {
+        var int x;
+        var int x1;
+        var int iter;
+
+        if (n < 1) {
+            return 0;
+        }
+        if (n = 1) {
+            return 1;
+        }
+        if (n < 4) {
+            return 1;
+        }
+
+        // Initial guess
+        let x = n / 2;
+        if (x < 2) {
+            let x = 2;
+        }
+
+        // Newton-Raphson with hard iteration limit
+        let iter = 0;
+        while (iter < 10) {
+            let x1 = (x + (n / x)) / 2;
+            if (x1 = x) {
+                return x;
+            }
+            // Check for oscillation (x and x1 differ by 1)
+            if ((x1 - x) = 1) {
+                return x;
+            }
+            if ((x - x1) = 1) {
+                return x1;
+            }
+            let x = x1;
+            let iter = iter + 1;
+        }
+        return x;
+    }
+}

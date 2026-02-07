@@ -1,0 +1,50 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Array.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * Represents an array.
+ * In the Jack language, arrays are instances of the Array class.
+ * Once declared, the array entries can be accessed using the usual
+ * syntax arr[i]. Each array entry can hold a primitive data type as
+ * well as any object type. Different array entries can have different
+ * data types.
+ *
+ * Implementation: Thin wrapper around Memory.alloc/deAlloc.
+ * Array storage is contiguous in heap memory.
+ */
+class Array {
+
+    /**
+     * Constructs a new Array of the given size.
+     *
+     * @param size Number of elements (must be > 0)
+     * @return Array pointer (base address of allocated memory)
+     *
+     * Time: O(n) where n = number of free blocks in heap
+     *
+     * Error: Sys.error(2) if size <= 0
+     */
+    function Array new(int size) {
+        if (size < 1) {
+            do Sys.error(2);
+            return 0;
+        }
+        return Memory.alloc(size);
+    }
+
+    /**
+     * Disposes this array.
+     * Returns the memory to the heap for future allocations.
+     *
+     * Time: O(n) where n = number of free blocks in heap
+     */
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+}

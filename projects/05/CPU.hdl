@@ -1,0 +1,112 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+ * Parses the binary code in the instruction input and executes it according to the
+ * Hack machine language specification. In the case of a C-instruction, computes the
+ * function specified by the instruction. If the instruction specifies to read a memory
+ * value, the inM input is expected to contain this value. If the instruction specifies
+ * to write a value to the memory, sets the outM output to this value, sets the addressM
+ * output to the target address, and asserts the writeM output (when writeM = 0, any
+ * value may appear in outM).
+ * If the reset input is 0, computes the address of the next instruction and sets the
+ * pc output to that value. If the reset input is 1, sets pc to 0.
+ * Note: The outM and writeM outputs are combinational: they are affected by the
+ * instruction's execution during the current cycle. The addressM and pc outputs are
+ * clocked: although they are affected by the instruction's execution, they commit to
+ * their new values only in the next cycle.
+ */
+
+// Instruction Format (C-instruction)
+// 
+// Bit:  15 14 13 | 12 | 11 10 9 8 7 6 | 5 4 3 | 2 1 0
+//      [1  x  x  | a  |   c-bits      |  dest | jump ]
+// 
+
+// | Bits | Field | Purpose |
+// |------|-------|---------|
+// | 15 | opcode | 1 = C-instruction, 0 = A-instruction |
+// | 12 | a-bit | 0 = use A, 1 = use M |
+// | 11-6 | c-bits | ALU control (zx, nx, zy, ny, f, no) |
+// | 5 | dest-A | Store result in A register |
+// | 4 | dest-D | Store result in D register |
+// | 3 | dest-M | Store result in M (writeM) |
+// | 2 | j1 | Jump if out < 0 |
+// | 1 | j2 | Jump if out = 0 |
+// | 0 | j3 | Jump if out > 0 |
+
+// Data Flow
+
+// A-instruction (@value):
+// 
+// instruction → A register
+// PC increments
+// 
+
+// C-instruction (dest=comp;jump):
+// 
+// 1. Select ALU inputs: D and (A or M)
+// 2. Compute ALU function (c-bits)
+// 3. Store result in dest (A, D, M)
+// 4. Evaluate jump condition on ALU flags
+// 5. PC jumps to A or increments
+
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+	// Decode the instruction type
+    Not(in=instruction[15], out=aInstr);
+    Not(in=aInstr, out=cInstr);
+
+    // A register input and load
+    Mux16(a=instruction, b=aluOut, sel=cInstr, out=aluOrInst);
+    And(a=cInstr, b=instruction[5], out=cInstrAndDestA);
+    Or(a=aInstr, b=cInstrAndDestA, out=loadA);
+    ARegister(in=aluOrInst, load=loadA, out=aOut, out[0..14]=addressM);
+    
+    // D register load
+    And(a=cInstr, b=instruction[4], out=loadD);
+    DRegister(in=aluOut, load=loadD, out=dOut);
+    
+    // ALU y-input selection
+    Mux16(a=aOut, b=inM, sel=instruction[12], out=aOrM);
+
+    // ALU computation
+    ALU(x=dOut, y=aOrM, 
+        zx=instruction[11], nx=instruction[10], 
+        zy=instruction[9],  ny=instruction[8],
+         f=instruction[7],  no=instruction[6], 
+        out=aluOut, out=outM, zr=zr, ng=ng);
+    
+    // writeM output
+    And(a=cInstr, b=instruction[3], out=writeM);
+    
+    // Jump logic
+    Not(in=ng, out=notNg);
+    Not(in=zr, out=notZr);
+    And(a=notNg, b=notZr, out=pos);              // positive = !ng AND !zr
+    
+    And(a=instruction[2], b=ng, out=j1);          // j1 AND ng
+    And(a=instruction[1], b=zr, out=j2);          // j2 AND zr  
+    And(a=instruction[0], b=pos, out=j3);         // j3 AND pos
+    
+    Or(a=j1, b=j2, out=j1Orj2);
+    Or(a=j1Orj2, b=j3, out=jumpCondMet);
+    And(a=cInstr, b=jumpCondMet, out=loadPC);
+    
+    // Program counter
+    PC(in=aOut, load=loadPC, inc=true, reset=reset, out[0..14]=pc);
+}

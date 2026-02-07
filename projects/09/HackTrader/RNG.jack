@@ -1,0 +1,147 @@
+/**
+ * RNG - Pseudo-Random Number Generator
+ *
+ * Implements a Linear Congruential Generator (LCG) tailored for 16-bit
+ * signed integer arithmetic. Uses carefully chosen constants that produce
+ * a full-period sequence within the 15-bit positive range.
+ *
+ * The seed can be initialized from keyboard timing for entropy.
+ *
+ * Formula: state = (state * LCG_MULTIPLIER + LCG_INCREMENT) & MASK_15BIT
+ * Period: 32768 (full period for modulus 2^15)
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class RNG {
+    field int state;    // Current PRNG state (0 to MASK_15BIT)
+
+    // --- LCG Constants ---
+    static int LCG_MULTIPLIER;  // LCG multiplicative constant
+    static int LCG_INCREMENT;   // LCG additive constant (prime)
+    static int MASK_15BIT;      // Bit mask for 15-bit positive range (2^15 - 1)
+    static int DEFAULT_SEED;    // Fallback seed when 0 is provided
+
+    /** Initializes RNG constants. Must be called before generateSeed(). */
+    function void init() {
+        let LCG_MULTIPLIER = 12345;
+        let LCG_INCREMENT = 8191;
+        let MASK_15BIT = 32767;
+        let DEFAULT_SEED = 17;
+        return;
+    }
+
+    /**
+     * Constructs a new RNG with the given initial seed.
+     * If seed is 0, uses a default non-zero seed.
+     */
+    constructor RNG new(int seed) {
+        if (seed = 0) {
+            let state = DEFAULT_SEED;
+        } else {
+            let state = seed & MASK_15BIT;
+        }
+        return this;
+    }
+
+    /** Disposes this RNG instance. */
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Generates the next pseudo-random number in range [0, MASK_15BIT].
+     * Uses LCG with constants chosen for good statistical properties
+     * within 16-bit arithmetic constraints.
+     */
+    method int next() {
+        // LCG: state = (state * a + c) mod m
+        // The multiplication can overflow 16-bit, but Jack's integer
+        // overflow wraps around, and we mask to 15 bits.
+        let state = (state * LCG_MULTIPLIER) + LCG_INCREMENT;
+        let state = state & MASK_15BIT;
+        return state;
+    }
+
+    /**
+     * Returns a pseudo-random integer in range [0, max-1].
+     * Uses modulo reduction. For best uniformity, max should be
+     * much smaller than 32768.
+     */
+    method int nextInRange(int max) {
+        var int val;
+        if (max < 2) {
+            return 0;
+        }
+        let val = next();
+        // Simple modulo — acceptable bias for small max values
+        return val - ((val / max) * max);
+    }
+
+    /**
+     * Returns a pseudo-random integer in range [min, max] inclusive.
+     */
+    method int nextBetween(int min, int max) {
+        return min + nextInRange((max - min) + 1);
+    }
+
+    /**
+     * Approximates a standard normal sample (mean=0, scaled by 64).
+     * Uses the Central Limit Theorem: sum of 4 uniform samples
+     * approximates a Gaussian. Returns value in range ~ [-256, +256]
+     * with standard deviation ~ 64.
+     */
+    method int nextGaussian() {
+        var int sum;
+        // Sum of 4 uniform samples in [-128, 127]
+        let sum = nextInRange(256) - 128;
+        let sum = sum + nextInRange(256) - 128;
+        let sum = sum + nextInRange(256) - 128;
+        let sum = sum + nextInRange(256) - 128;
+        return sum / 2;
+    }
+
+    /**
+     * Sets a new seed value, re-initializing the generator.
+     */
+    method void setSeed(int seed) {
+        if (seed = 0) {
+            let state = DEFAULT_SEED;
+        } else {
+            let state = seed & MASK_15BIT;
+        }
+        return;
+    }
+
+    /**
+     * Generates an entropy seed by measuring keyboard timing.
+     * Prompts the user to press any key and uses the elapsed
+     * loop iterations as a seed source.
+     *
+     * Must be called after RNG.init() and before game starts.
+     */
+    function int generateSeed() {
+        var int counter;
+        var int key;
+
+        let counter = 1;
+        let key = 0;
+
+        // Wait for key press, counting iterations
+        while (key = 0) {
+            let key = Keyboard.keyPressed();
+            let counter = counter + 1;
+            if (counter < 0) {
+                // Overflow protection: wrap around
+                let counter = 1;
+            }
+        }
+
+        // Wait for key release
+        while (~(Keyboard.keyPressed() = 0)) {
+            let counter = counter + 1;
+        }
+
+        return counter & MASK_15BIT;
+    }
+}

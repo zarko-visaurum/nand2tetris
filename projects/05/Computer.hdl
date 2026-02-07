@@ -1,0 +1,103 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/Computer.hdl
+/**
+ * The Hack computer, consisting of CPU, ROM and RAM.
+ * When reset = 0, the program stored in the ROM executes.
+ * When reset = 1, the program's execution restarts. 
+ * Thus, to start running the currently loaded program,
+ * set reset to 1, and then set it to 0. 
+ * From this point onwards, the user is at the mercy of the software.
+ * Depending on the program's code, and whether the code is correct,
+ * the screen may show some output, the user may be expected to enter
+ * some input using the keyboard, or the program may do some procerssing. 
+ */
+
+//  ## How It Works
+// ```
+// ┌─────────────────────────────────────────────┐
+// │                  Computer                   │
+// │                                             │
+// │  ┌────────┐         ┌──────────────────┐    │
+// │  │ ROM32K │─────────▶ instruction      │    │
+// │  │        │         │                  │    │
+// │  │address ◀─────────┤ pc          CPU  │    │
+// │  └────────┘         │                  │    │
+// │                     │ outM ────────┐   │    │
+// │                     │ writeM ──┐   │   │    │
+// │                     │ addressM │   │   │    │
+// │                     │          │   │   │    │
+// │                     │ inM ◀──┐ │   │   │    │
+// │                     └────────┼─┼───┼───┘    │
+// │                              │ │   │        │
+// │                     ┌────────┼─┼───┼───┐    │
+// │                     │   Memory         │    │
+// │                     │        │ │   │   │    │
+// │                     │ out ───┘ │   │   │    │
+// │                     │ load ◀───┘   │   │    │
+// │                     │ in ◀─────────┘   │    │
+// │                     │ address ◀────────┘    │
+// │                     └──────────────────┘    │
+// │                                             │
+// └─────────────────────────────────────────────┘
+// ```
+
+// ## Signal Flow
+
+// **Instruction Fetch (every cycle):**
+// 1. CPU outputs `pc` (program counter)
+// 2. ROM uses `pc` as address
+// 3. ROM outputs `instruction` to CPU
+
+// **Data Access (C-instructions that read M):**
+// 1. CPU outputs `addressM`
+// 2. Memory reads from `address`
+// 3. Memory outputs data to CPU via `inM`
+
+// **Data Write (C-instructions with dest=M):**
+// 1. CPU outputs `outM` (data), `addressM` (address), `writeM=1`
+// 2. Memory writes `outM` to location `addressM`
+
+// **Reset:**
+// - `reset=1` → CPU sets PC to 0
+// - `reset=0` → Normal execution continues
+
+// ## Complete Hierarchy
+// ```
+// Computer
+// ├── ROM32K (instruction memory)
+// ├── CPU
+// │   ├── ARegister
+// │   ├── DRegister  
+// │   ├── PC
+// │   │   ├── Register
+// │   │   │   └── 16× Bit (DFF + Mux)
+// │   │   ├── Inc16
+// │   │   └── Mux16
+// │   └── ALU
+// │       ├── Add16
+// │       │   └── 16× FullAdder
+// │       │       └── HalfAdder
+// │       └── And16, Not16, Mux16, Or8Way...
+// └── Memory
+//     ├── RAM16K
+//     │   └── Hierarchical RAM (8×RAM4K→8×RAM512→8×RAM64→8×RAM8→8×Register)
+//     ├── Screen (8K memory-mapped)
+//     └── Keyboard (1 register memory-mapped)
+
+CHIP Computer {
+
+    IN reset;
+
+    PARTS:
+    // ROM: Program memory (instruction fetch)
+    ROM32K(address=pc, out=instruction);
+
+    // CPU: Execute instruction
+    CPU(inM=memOut, instruction=instruction, reset=reset, 
+        outM=outM, writeM=writeM, addressM=addressM, pc=pc);
+
+    // Memory: Data (RAM + Screen + Keyboard)
+    Memory(in=outM, load=writeM, address=addressM, out=memOut);
+}

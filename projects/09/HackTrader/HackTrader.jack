@@ -1,0 +1,532 @@
+/**
+ * HackTrader - Main game controller and orchestrator.
+ *
+ * Manages the game lifecycle: initialization, the main tick loop,
+ * bot order generation, fill detection, and game-over conditions.
+ *
+ * Each tick:
+ *   1. Price engine advances (underlying moves)
+ *   2. Options pricer recalculates Greeks
+ *   3. Bot orders arrive and may fill player's quotes
+ *   4. Player input is processed
+ *   5. UI refreshes
+ *
+ * Difficulty levels control volatility and order flow intensity.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class HackTrader {
+    field OrderBook book;         // The limit order book
+    field MarketMaker player;     // Player's market making state
+    field OptionsPricer pricer;   // Black-Scholes pricing engine
+    field PriceEngine engine;     // Underlying price random walk
+    field TradeHasher hasher;     // Trade signature generator
+    field UI ui;                  // Screen renderer
+    field RNG rng;                // Shared random number generator
+
+    field int currentRound;       // Current game round (tick count)
+    field int totalRounds;        // Total rounds per game
+    field int difficulty;         // 1=easy, 2=medium, 3=hard
+    field int botFlowRate;        // Bot order probability per tick (0-100)
+    field int botSizeMax;         // Max bot order size
+    field int tickDelayMs;        // Milliseconds between ticks
+    field boolean gameRunning;    // Game loop control flag
+    field Array pnlHistory;       // P&L at end of each round (for equity curve)
+
+    // Pre-allocated status strings (avoid per-tick heap allocation)
+    field String sMsgStart;
+    field String sMsgBuyFill;
+    field String sMsgNoAsks;
+    field String sMsgSellFill;
+    field String sMsgNoBids;
+    field String sMsgWiden;
+    field String sMsgNarrow;
+    field String sMsgSizeUp;
+    field String sMsgSizeDown;
+    field String sMsgOverLimit;
+
+    // --- Game Timing (parametrizable via setters) ---
+    static int TOTAL_ROUNDS;           // Game duration in ticks
+    static int TICK_DELAY_MS;          // Delay per tick in milliseconds
+
+    // --- Starting State ---
+    static int START_PRICE;            // Initial underlying price (x10 fixed-point)
+    static int INIT_QUOTE_SIZE;        // Player's initial quote size
+    static int MAX_POSITION;           // Player's position limit
+    static int VOL_MULTIPLIER;         // Multiplier for vol passed to OptionsPricer
+
+    // --- Order Book Initialization ---
+    static int BOOK_TICK_SIZE;         // Spacing between initial book levels (x10)
+    static int BOOK_BASE_QTY;         // Base quantity at each initial level
+    static int BOOK_INIT_LEVELS;      // Number of initial levels per side
+
+    // --- Bot Behavior ---
+    static int BOT_MKT_ORDER_PROB;    // Out of 10: probability of market order
+    static int BOT_LIMIT_OFFSET_RANGE; // Random offset range for limit orders (x10)
+    static int BOT_LIMIT_OFFSET_MIN;   // Minimum offset for limit orders (x10)
+
+    // --- Liquidity Replenishment ---
+    static int MIN_BOOK_LEVELS;        // Minimum levels before replenishing
+    static int REPLENISH_TARGET;       // Target levels when replenishing
+    static int REPLENISH_SPACING;      // Price spacing between levels (x10)
+    static int REPLENISH_QTY_RANGE;    // Random range for replenish quantity
+    static int REPLENISH_QTY_BASE;     // Base quantity added per level
+
+    // --- Per-Difficulty: Volatility ---
+    static int VOL_EASY;
+    static int VOL_MEDIUM;
+    static int VOL_HARD;
+
+    // --- Per-Difficulty: Bot Flow Rate (0-100%) ---
+    static int FLOW_RATE_EASY;
+    static int FLOW_RATE_MEDIUM;
+    static int FLOW_RATE_HARD;
+
+    // --- Per-Difficulty: Max Bot Order Size ---
+    static int BOT_SIZE_EASY;
+    static int BOT_SIZE_MEDIUM;
+    static int BOT_SIZE_HARD;
+
+    // --- Per-Difficulty: Initial Spread (x10) ---
+    static int SPREAD_EASY;
+    static int SPREAD_MEDIUM;
+    static int SPREAD_HARD;
+
+    /**
+     * Initializes all game configuration constants.
+     * Must be called once before creating a HackTrader instance.
+     */
+    function void init() {
+        let TOTAL_ROUNDS = 30;
+        let TICK_DELAY_MS = 200;
+        let START_PRICE = 1000;
+        let INIT_QUOTE_SIZE = 2;
+        let MAX_POSITION = 20;
+        let VOL_MULTIPLIER = 10;
+
+        let BOOK_TICK_SIZE = 10;
+        let BOOK_BASE_QTY = 3;
+        let BOOK_INIT_LEVELS = 5;
+
+        let BOT_MKT_ORDER_PROB = 3;
+        let BOT_LIMIT_OFFSET_RANGE = 30;
+        let BOT_LIMIT_OFFSET_MIN = 5;
+
+        let MIN_BOOK_LEVELS = 3;
+        let REPLENISH_TARGET = 4;
+        let REPLENISH_SPACING = 10;
+        let REPLENISH_QTY_RANGE = 3;
+        let REPLENISH_QTY_BASE = 2;
+
+        let VOL_EASY = 2;
+        let VOL_MEDIUM = 4;
+        let VOL_HARD = 7;
+
+        let FLOW_RATE_EASY = 40;
+        let FLOW_RATE_MEDIUM = 60;
+        let FLOW_RATE_HARD = 80;
+
+        let BOT_SIZE_EASY = 3;
+        let BOT_SIZE_MEDIUM = 5;
+        let BOT_SIZE_HARD = 7;
+
+        let SPREAD_EASY = 10;
+        let SPREAD_MEDIUM = 10;
+        let SPREAD_HARD = 15;
+        return;
+    }
+
+    /** Sets the total number of rounds (call after init, before new). */
+    function void setTotalRounds(int r) {
+        let TOTAL_ROUNDS = r;
+        return;
+    }
+
+    /** Sets the tick delay in ms (call after init, before new). */
+    function void setTickDelay(int ms) {
+        let TICK_DELAY_MS = ms;
+        return;
+    }
+
+    /**
+     * Constructs the game with given difficulty and RNG seed.
+     *
+     * @param diff Difficulty level (1-3)
+     * @param seed Random seed (from keyboard timing)
+     */
+    constructor HackTrader new(int diff, int seed) {
+        var int vol;
+        var int initSpread;
+        var int startPrice;
+
+        let difficulty = diff;
+        let totalRounds = TOTAL_ROUNDS;
+        let tickDelayMs = TICK_DELAY_MS;
+        let currentRound = 0;
+        let gameRunning = true;
+        let startPrice = START_PRICE;
+
+        // Configure difficulty
+        if (diff = 1) {
+            let vol = VOL_EASY;
+            let botFlowRate = FLOW_RATE_EASY;
+            let botSizeMax = BOT_SIZE_EASY;
+            let initSpread = SPREAD_EASY;
+        } else {
+            if (diff = 2) {
+                let vol = VOL_MEDIUM;
+                let botFlowRate = FLOW_RATE_MEDIUM;
+                let botSizeMax = BOT_SIZE_MEDIUM;
+                let initSpread = SPREAD_MEDIUM;
+            } else {
+                let vol = VOL_HARD;
+                let botFlowRate = FLOW_RATE_HARD;
+                let botSizeMax = BOT_SIZE_HARD;
+                let initSpread = SPREAD_HARD;
+            }
+        }
+
+        // Allocate P&L history for equity curve on game over screen
+        let pnlHistory = Array.new(totalRounds);
+
+        // Initialize components
+        let rng = RNG.new(seed);
+        let book = OrderBook.new();
+        let player = MarketMaker.new(initSpread, INIT_QUOTE_SIZE, MAX_POSITION);
+        let pricer = OptionsPricer.new(startPrice, vol * VOL_MULTIPLIER, totalRounds);
+        let engine = PriceEngine.new(startPrice, vol, 0, rng);
+        let hasher = TradeHasher.new();
+        let ui = UI.new();
+
+        // Initialize order book with liquidity around start price
+        do book.initializeBook(startPrice, BOOK_TICK_SIZE, BOOK_BASE_QTY,
+                               BOOK_INIT_LEVELS);
+
+        // Set initial quotes
+        do player.updateQuotes(startPrice);
+
+        // Pre-allocate status message strings (avoids per-tick heap leaks)
+        let sMsgStart = "Game started! Manage your quotes.";
+        let sMsgBuyFill = "Manual BUY filled!";
+        let sMsgNoAsks = "No asks to buy from!";
+        let sMsgSellFill = "Manual SELL filled!";
+        let sMsgNoBids = "No bids to sell to!";
+        let sMsgWiden = "Spread widened.";
+        let sMsgNarrow = "Spread narrowed.";
+        let sMsgSizeUp = "Quote size increased.";
+        let sMsgSizeDown = "Quote size decreased.";
+        let sMsgOverLimit = "OVER LIMIT - no new fills";
+
+        return this;
+    }
+
+    /** Disposes all game components. */
+    method void dispose() {
+        do book.dispose();
+        do player.dispose();
+        do pricer.dispose();
+        do engine.dispose();
+        do hasher.dispose();
+        do ui.dispose();
+        do rng.dispose();
+        do pnlHistory.dispose();
+        do sMsgStart.dispose();
+        do sMsgBuyFill.dispose();
+        do sMsgNoAsks.dispose();
+        do sMsgSellFill.dispose();
+        do sMsgNoBids.dispose();
+        do sMsgWiden.dispose();
+        do sMsgNarrow.dispose();
+        do sMsgSizeUp.dispose();
+        do sMsgSizeDown.dispose();
+        do sMsgOverLimit.dispose();
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Runs the main game loop.
+     * Returns when game ends (all rounds complete or player quits).
+     *
+     * @return Final total P&L (x10)
+     */
+    method int run() {
+        var int key;
+        var int spotPrice;
+
+        // Initial screen draw
+        do ui.clearScreen();
+        let spotPrice = engine.getPrice();
+        do pricer.recalculate(spotPrice, totalRounds - currentRound);
+        do ui.drawTitle();
+        do ui.drawStaticLabels();
+        do ui.drawOrderBook(book);
+        do ui.drawGreeks(pricer);
+        do ui.drawPosition(player, spotPrice);
+        do ui.drawTradeLogPanel(hasher);
+        do ui.drawControls(currentRound, totalRounds);
+        do ui.drawStatus(sMsgStart);
+
+        // Main game loop
+        while (gameRunning & (currentRound < totalRounds)) {
+            // 1. Process player input (non-blocking)
+            let key = Keyboard.keyPressed();
+            do processInput(key);
+
+            // Wait for key release to avoid repeat
+            if (~(key = 0)) {
+                while (~(Keyboard.keyPressed() = 0)) {
+                    // spin
+                }
+            }
+
+            // 2. Advance price
+            do engine.tick();
+            let spotPrice = engine.getPrice();
+
+            // 3. Recalculate options
+            do pricer.recalculate(spotPrice, totalRounds - currentRound);
+
+            // 4. Update player quotes around new mid
+            do player.updateQuotes(book.getMidPrice());
+
+            // 5. Generate bot orders and check for fills
+            do generateBotFlow(spotPrice);
+            do checkPlayerFills(spotPrice);
+
+            // 6. Replenish book liquidity if thin
+            do replenishBook(spotPrice);
+
+            // 7. Advance round and record P&L for equity curve
+            let currentRound = currentRound + 1;
+            let pnlHistory[currentRound - 1] = player.getTotalPnL(spotPrice);
+
+            // 8. Refresh display (title is static, drawn once)
+            do ui.drawOrderBook(book);
+            do ui.drawGreeks(pricer);
+            do ui.drawPosition(player, spotPrice);
+            do ui.drawTradeLogPanel(hasher);
+            do ui.drawControls(currentRound, totalRounds);
+
+            // 9. Tick delay
+            do Sys.wait(tickDelayMs);
+        }
+
+        // Game over
+        do ui.drawGameOver(player, engine.getPrice(), currentRound, pnlHistory);
+
+        return player.getTotalPnL(engine.getPrice());
+    }
+
+    /**
+     * Processes a single keyboard input.
+     * Controls: B=buy, S=sell, W=widen, N=narrow, +/-=size, Q=quit
+     */
+    method void processInput(int key) {
+        var int filled;
+        var int spotPrice;
+
+        let spotPrice = engine.getPrice();
+
+        // B = Buy (66)
+        if (key = 66) {
+            let filled = book.submitMarketOrder(player.getQuoteSize(), true);
+            if (filled > 0) {
+                do player.onFill(book.getFillPrice(), filled, true);
+                do logTrade(book.getFillPrice(), filled, true);
+                do ui.drawStatus(sMsgBuyFill);
+            } else {
+                do ui.drawStatus(sMsgNoAsks);
+            }
+            return;
+        }
+
+        // S = Sell (83)
+        if (key = 83) {
+            let filled = book.submitMarketOrder(player.getQuoteSize(), false);
+            if (filled > 0) {
+                do player.onFill(book.getFillPrice(), filled, false);
+                do logTrade(book.getFillPrice(), filled, false);
+                do ui.drawStatus(sMsgSellFill);
+            } else {
+                do ui.drawStatus(sMsgNoBids);
+            }
+            return;
+        }
+
+        // W = Widen spread (87)
+        if (key = 87) {
+            do player.widenSpread();
+            do player.updateQuotes(book.getMidPrice());
+            do ui.drawStatus(sMsgWiden);
+            return;
+        }
+
+        // N = Narrow spread (78)
+        if (key = 78) {
+            do player.narrowSpread();
+            do player.updateQuotes(book.getMidPrice());
+            do ui.drawStatus(sMsgNarrow);
+            return;
+        }
+
+        // + = Increase size (43 is '+')
+        if ((key = 43) | (key = 61)) {  // '+' or '='
+            do player.increaseSize();
+            do ui.drawStatus(sMsgSizeUp);
+            return;
+        }
+
+        // - = Decrease size (45)
+        if (key = 45) {
+            do player.decreaseSize();
+            do ui.drawStatus(sMsgSizeDown);
+            return;
+        }
+
+        // Q = Quit (81)
+        if (key = 81) {
+            let gameRunning = false;
+            return;
+        }
+
+        return;
+    }
+
+    /**
+     * Generates random bot order flow.
+     * Bots submit market orders that may trade against book liquidity
+     * or place limit orders that add to the book.
+     */
+    method void generateBotFlow(int spotPrice) {
+        var int roll;
+        var int botQty;
+        var boolean botBuy;
+        var int limitPrice;
+        var int offset;
+
+        // Random chance of bot activity this tick
+        let roll = rng.nextInRange(100);
+        if (roll > botFlowRate) {
+            return;  // No bot activity this tick
+        }
+
+        // Determine bot order: 50% buy, 50% sell
+        let botBuy = (rng.nextInRange(2) = 0);
+        let botQty = rng.nextInRange(botSizeMax) + 1;
+
+        // Market vs limit order decision
+        let roll = rng.nextInRange(10);
+        if (roll < BOT_MKT_ORDER_PROB) {
+            // Market order: hits the book directly
+            do book.submitMarketOrder(botQty, botBuy);
+        } else {
+            // Limit order: placed near the mid
+            let offset = rng.nextInRange(BOT_LIMIT_OFFSET_RANGE)
+                         + BOT_LIMIT_OFFSET_MIN;
+            if (botBuy) {
+                let limitPrice = spotPrice - offset;
+                do book.addLiquidity(limitPrice, botQty, true);
+            } else {
+                let limitPrice = spotPrice + offset;
+                do book.addLiquidity(limitPrice, botQty, false);
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Checks if any bot market orders have filled against player's quotes.
+     * Simulates incoming flow hitting the player's bid or ask.
+     */
+    method void checkPlayerFills(int spotPrice) {
+        var int roll;
+        var int fillQty;
+        var boolean fillBuy;
+        var int fillPrice;
+
+        // Chance of filling player's quotes (proportional to flow rate)
+        let roll = rng.nextInRange(100);
+        if (roll > (botFlowRate / 2)) {
+            return;
+        }
+
+        // Determine which side gets filled
+        let fillBuy = (rng.nextInRange(2) = 0);
+        let fillQty = rng.nextInRange(player.getQuoteSize()) + 1;
+
+        if (fillBuy) {
+            // Someone sells to our bid
+            let fillPrice = player.getBidPrice();
+            if ((fillPrice > 0) & (~player.isOverLimit())) {
+                do player.onFill(fillPrice, fillQty, true);
+                do logTrade(fillPrice, fillQty, true);
+            }
+        } else {
+            // Someone buys from our ask
+            let fillPrice = player.getAskPrice();
+            if ((fillPrice > 0) & (~player.isOverLimit())) {
+                do player.onFill(fillPrice, fillQty, false);
+                do logTrade(fillPrice, fillQty, false);
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Replenishes the order book with fresh liquidity if levels are thin.
+     * Ensures the game remains playable with sufficient depth.
+     */
+    method void replenishBook(int spotPrice) {
+        var int bidCount;
+        var int askCount;
+        var int i;
+
+        let bidCount = book.getBidCount();
+        let askCount = book.getAskCount();
+
+        if (bidCount < MIN_BOOK_LEVELS) {
+            let i = bidCount;
+            while (i < REPLENISH_TARGET) {
+                do book.addLiquidity(
+                    spotPrice - ((i + 1) * REPLENISH_SPACING),
+                    rng.nextInRange(REPLENISH_QTY_RANGE) + REPLENISH_QTY_BASE,
+                    true);
+                let i = i + 1;
+            }
+        }
+
+        if (askCount < MIN_BOOK_LEVELS) {
+            let i = askCount;
+            while (i < REPLENISH_TARGET) {
+                do book.addLiquidity(
+                    spotPrice + ((i + 1) * REPLENISH_SPACING),
+                    rng.nextInRange(REPLENISH_QTY_RANGE) + REPLENISH_QTY_BASE,
+                    false);
+                let i = i + 1;
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Logs a trade with its hash signature to the UI.
+     */
+    method void logTrade(int price, int qty, boolean isBuy) {
+        var int hashVal;
+        var int side;
+
+        if (isBuy) {
+            let side = 1;
+        } else {
+            let side = 0;
+        }
+
+        let hashVal = hasher.hash(price, qty, side, currentRound);
+        do ui.addTradeToLog(price, qty, isBuy, hashVal);
+        return;
+    }
+}

@@ -1,0 +1,456 @@
+/**
+ * Main - Entry point for HackTrader.
+ *
+ * Handles splash screen with pixel-art candlestick chart,
+ * difficulty selection, game loop, and exit screen.
+ *
+ * Block letter rendering uses a 3x5 bitmap font with 8x8 pixel cells.
+ * Candlestick chart uses filled/hollow rectangles and vertical lines.
+ * Dithered rectangles create "gray" fill via checkerboard pixel pattern.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class Main {
+
+    /**
+     * Application entry point.
+     * Splash → difficulty select → game → game over → restart/quit loop.
+     */
+    function void main() {
+        var int difficulty;
+        var int seed;
+        var int result;
+        var boolean running;
+        var HackTrader game;
+        var int key;
+
+        // Initialize static constants for all classes
+        do RNG.init();
+        do HackTrader.init();
+
+        let running = true;
+
+        while (running) {
+            do Main.drawSplash();
+
+            // Wait for difficulty selection
+            let difficulty = 0;
+            while ((difficulty = 0) & running) {
+                let key = Keyboard.keyPressed();
+                if (key = 49) { let difficulty = 1; }  // '1'
+                if (key = 50) { let difficulty = 2; }  // '2'
+                if (key = 51) { let difficulty = 3; }  // '3'
+                if (key = 81) { let running = false; }   // 'Q'
+            }
+
+            // Wait for key release
+            while (~(Keyboard.keyPressed() = 0)) {
+                // spin
+            }
+
+            if (running) {
+                // Generate seed from timing
+                do Output.moveCursor(22, 18);
+                do Output.printString("Press any key to start...");
+                let seed = RNG.generateSeed();
+
+                // Create and run game
+                let game = HackTrader.new(difficulty, seed);
+                let result = game.run();
+
+                // Game over screen — wait for restart or quit
+                let key = 0;
+                while ((~(key = 82)) & (~(key = 81))) {  // R=82, Q=81
+                    let key = Keyboard.keyPressed();
+                }
+
+                // Wait for release
+                while (~(Keyboard.keyPressed() = 0)) {
+                    // spin
+                }
+
+                if (key = 81) {
+                    let running = false;
+                }
+
+                do game.dispose();
+            }
+        }
+
+        // Exit screen
+        do Main.drawExitScreen();
+        return;
+    }
+
+    /**
+     * Draws the enhanced splash screen with block letters and candlestick chart.
+     */
+    function void drawSplash() {
+        do Screen.clearScreen();
+        do Screen.setColor(true);
+
+        // Top border (2px thick)
+        do Screen.drawRectangle(0, 0, 511, 1);
+        // Bottom border
+        do Screen.drawRectangle(0, 254, 511, 255);
+
+        // "HACKTRADER" in block letters starting at y=12
+        // Each letter: 3 cols × 5 rows × 8px cells = 24×40 px
+        // 10 letters with 4px gaps: 10*24 + 9*4 = 276px
+        // Centered: (512-276)/2 = 118
+        do Main.drawBlockLetter(118, 12, 72);   // H
+        do Main.drawBlockLetter(146, 12, 65);   // A
+        do Main.drawBlockLetter(174, 12, 67);   // C
+        do Main.drawBlockLetter(202, 12, 75);   // K
+        do Main.drawBlockLetter(230, 12, 84);   // T
+        do Main.drawBlockLetter(258, 12, 82);   // R
+        do Main.drawBlockLetter(286, 12, 65);   // A
+        do Main.drawBlockLetter(314, 12, 68);   // D
+        do Main.drawBlockLetter(342, 12, 69);   // E
+        do Main.drawBlockLetter(370, 12, 82);   // R
+
+        // Gradient backdrop behind chart area (y=68 to y=195)
+        do Main.drawGradientV(80, 68, 430, 195);
+
+        // Subtitle (drawn after gradient so text is fully visible)
+        do Output.moveCursor(5, 18);
+        do Output.printString("Market Making Simulator");
+
+        // Candlestick chart (y=70 to y=175) — drawn on top of gradient
+        do Main.drawCandlesticks(96, 70);
+
+        // Difficulty menu (rows 19-21, below volume bars)
+        do Output.moveCursor(19, 18);
+        do Output.printString("1  Easy   (low vol, slow)");
+        do Output.moveCursor(20, 18);
+        do Output.printString("2  Medium (mid vol, mid)");
+        do Output.moveCursor(21, 18);
+        do Output.printString("3  Hard   (high vol, fast)");
+
+        // Small filled squares before each option
+        // Col 17 = x136, squares at x125..130 with gap before text
+        // Row 19 starts at y=209, row 20 at y=220, row 21 at y=231
+        do Screen.drawRectangle(125, 212, 130, 217);
+        do Screen.drawRectangle(125, 223, 130, 228);
+        do Screen.drawRectangle(125, 234, 130, 239);
+
+        return;
+    }
+
+    /**
+     * Draws a block letter at pixel position (x, y).
+     * Letters are 3 columns × 5 rows, each cell is 8×8 pixels.
+     * @param letter ASCII code of the letter to draw
+     */
+    function void drawBlockLetter(int x, int y, int letter) {
+        var int r0, r1, r2, r3, r4;
+
+        // Each row is a 3-bit pattern: bit2=col0, bit1=col1, bit0=col2
+        // 7=111, 5=101, 4=100, 3=011, 2=010, 6=110, 1=001
+
+        // H = 72
+        if (letter = 72) {
+            let r0 = 5; let r1 = 5; let r2 = 7; let r3 = 5; let r4 = 5;
+        } else {
+        // A = 65
+        if (letter = 65) {
+            let r0 = 2; let r1 = 5; let r2 = 7; let r3 = 5; let r4 = 5;
+        } else {
+        // C = 67
+        if (letter = 67) {
+            let r0 = 7; let r1 = 4; let r2 = 4; let r3 = 4; let r4 = 7;
+        } else {
+        // K = 75
+        if (letter = 75) {
+            let r0 = 5; let r1 = 5; let r2 = 6; let r3 = 5; let r4 = 5;
+        } else {
+        // T = 84
+        if (letter = 84) {
+            let r0 = 7; let r1 = 2; let r2 = 2; let r3 = 2; let r4 = 2;
+        } else {
+        // R = 82
+        if (letter = 82) {
+            let r0 = 7; let r1 = 5; let r2 = 7; let r3 = 6; let r4 = 5;
+        } else {
+        // D = 68
+        if (letter = 68) {
+            let r0 = 6; let r1 = 5; let r2 = 5; let r3 = 5; let r4 = 6;
+        } else {
+        // E = 69
+        if (letter = 69) {
+            let r0 = 7; let r1 = 4; let r2 = 7; let r3 = 4; let r4 = 7;
+        } else {
+        // G = 71
+        if (letter = 71) {
+            let r0 = 7; let r1 = 4; let r2 = 5; let r3 = 5; let r4 = 7;
+        } else {
+        // M = 77
+        if (letter = 77) {
+            let r0 = 5; let r1 = 7; let r2 = 7; let r3 = 5; let r4 = 5;
+        } else {
+        // O = 79
+        if (letter = 79) {
+            let r0 = 7; let r1 = 5; let r2 = 5; let r3 = 5; let r4 = 7;
+        } else {
+        // V = 86
+        if (letter = 86) {
+            let r0 = 5; let r1 = 5; let r2 = 5; let r3 = 5; let r4 = 2;
+        } else {
+            // Unknown letter: draw solid block
+            let r0 = 7; let r1 = 7; let r2 = 7; let r3 = 7; let r4 = 7;
+        }}}}}}}}}}}}
+
+        do Main.drawLetterRow(x, y, r0);
+        do Main.drawLetterRow(x, y + 8, r1);
+        do Main.drawLetterRow(x, y + 16, r2);
+        do Main.drawLetterRow(x, y + 24, r3);
+        do Main.drawLetterRow(x, y + 32, r4);
+        return;
+    }
+
+    /**
+     * Draws one row of a block letter.
+     * @param pattern 3-bit pattern (bit2=leftmost col, bit0=rightmost)
+     */
+    function void drawLetterRow(int x, int y, int pattern) {
+        // Col 0 (leftmost): bit 2 → pattern & 4
+        if (~((pattern & 4) = 0)) {
+            do Screen.drawRectangle(x, y, x + 7, y + 7);
+        }
+        // Col 1 (middle): bit 1 → pattern & 2
+        if (~((pattern & 2) = 0)) {
+            do Screen.drawRectangle(x + 8, y, x + 15, y + 7);
+        }
+        // Col 2 (rightmost): bit 0 → pattern & 1
+        if (~((pattern & 1) = 0)) {
+            do Screen.drawRectangle(x + 16, y, x + 23, y + 7);
+        }
+        return;
+    }
+
+    /**
+     * Draws an 8-candle candlestick chart at origin (x, y).
+     * Chart is ~320px wide × 105px tall.
+     * Includes wicks, bodies (filled=bullish, hollow=bearish), and dithered volume.
+     */
+    function void drawCandlesticks(int x, int y) {
+        // Predefined candle data (high, open, close, low, volume)
+        // Prices scaled to pixel offsets from top of chart area (0=top, 100=bottom)
+        // Candle spacing: 40px per candle
+
+        // X-axis line
+        do Screen.drawLine(x, y + 105, x + 320, y + 105);
+
+        // Candles: drawCandle(cx, chartY, high, bodyTop, bodyBot, low, bullish, vol)
+        // bodyTop < bodyBot always (top = smaller y = higher price)
+        // Bullish: open=bodyBot, close=bodyTop (close > open)
+        // Bearish: open=bodyTop, close=bodyBot (open > close)
+        do Main.drawCandle(x + 16, y, 20, 35, 60, 75, true, 8);
+        do Main.drawCandle(x + 56, y, 15, 25, 50, 60, true, 12);
+        do Main.drawCandle(x + 96, y, 10, 25, 55, 70, false, 16);
+        do Main.drawCandle(x + 136, y, 30, 40, 65, 80, false, 10);
+        do Main.drawCandle(x + 176, y, 25, 35, 55, 70, true, 14);
+        do Main.drawCandle(x + 216, y, 10, 20, 45, 55, true, 20);
+        do Main.drawCandle(x + 256, y, 5, 20, 50, 60, false, 6);
+        do Main.drawCandle(x + 296, y, 15, 25, 40, 55, true, 18);
+
+        return;
+    }
+
+    /**
+     * Draws a single candlestick with wick, body, and dithered volume bar.
+     * @param cx Center x position of the candle
+     * @param chartY Top of chart area (y origin)
+     * @param high Pixel offset from chartY for highest point (wick top)
+     * @param bodyTop Pixel offset for top of body
+     * @param bodyBot Pixel offset for bottom of body
+     * @param low Pixel offset for lowest point (wick bottom)
+     * @param bullish true=filled body, false=hollow body
+     * @param vol Volume bar height in pixels
+     */
+    function void drawCandle(int cx, int chartY, int high, int bodyTop,
+                             int bodyBot, int low, boolean bullish, int vol) {
+        var int wickX;
+        var int bodyLeft;
+        var int bodyRight;
+
+        let wickX = cx + 4;
+        let bodyLeft = cx;
+        let bodyRight = cx + 8;
+
+        do Screen.setColor(true);
+
+        // Draw wick (full height)
+        do Screen.drawLine(wickX, chartY + high, wickX, chartY + low);
+
+        // Draw body
+        if (bullish) {
+            // Filled body (black rectangle)
+            do Screen.drawRectangle(bodyLeft, chartY + bodyTop,
+                                    bodyRight, chartY + bodyBot);
+        } else {
+            // Hollow body: draw border then erase interior
+            do Screen.drawRectangle(bodyLeft, chartY + bodyTop,
+                                    bodyRight, chartY + bodyBot);
+            do Screen.setColor(false);
+            do Screen.drawRectangle(bodyLeft + 1, chartY + bodyTop + 1,
+                                    bodyRight - 1, chartY + bodyBot - 1);
+            do Screen.setColor(true);
+        }
+
+        // Dithered volume bar below x-axis (at chartY+108 to chartY+108+vol)
+        if (vol > 0) {
+            do Main.drawDitheredRect(bodyLeft, chartY + 108,
+                                     bodyRight, chartY + 108 + vol);
+        }
+        return;
+    }
+
+    /**
+     * Draws a checkerboard-pattern filled rectangle (perceived as 50% "gray").
+     * Every other pixel is drawn, offset by row for checkerboard effect.
+     */
+    function void drawDitheredRect(int x1, int y1, int x2, int y2) {
+        var int py;
+        var int px;
+
+        let py = y1;
+        while (py < (y2 + 1)) {
+            let px = x1 + (py & 1);  // Offset odd rows by 1 pixel
+            while (px < (x2 + 1)) {
+                do Screen.drawPixel(px, py);
+                let px = px + 2;
+            }
+            let py = py + 1;
+        }
+        return;
+    }
+
+    /**
+     * Draws a 25% density dithered rectangle (sparse — perceived as "light gray").
+     * Every row draws one pixel per 4 columns; odd rows offset by 2 pixels.
+     * Result: uniform 25% fill (1 pixel per 4-pixel block).
+     */
+    function void drawDithered25(int x1, int y1, int x2, int y2) {
+        var int py;
+        var int px;
+
+        let py = y1;
+        while (py < (y2 + 1)) {
+            // Odd rows offset by 2, creating diagonal pattern
+            let px = x1 + ((py & 1) * 2);
+            while (px < (x2 + 1)) {
+                do Screen.drawPixel(px, py);
+                let px = px + 4;
+            }
+            let py = py + 1;
+        }
+        return;
+    }
+
+    /**
+     * Draws a 75% density dithered rectangle (dense — perceived as "dark gray").
+     * Fills all pixels then erases in checkerboard pattern (inverse of 50%).
+     */
+    function void drawDithered75(int x1, int y1, int x2, int y2) {
+        var int py;
+        var int px;
+
+        // Fill solid first
+        do Screen.setColor(true);
+        do Screen.drawRectangle(x1, y1, x2, y2);
+
+        // Erase checkerboard pixels (creates 75% density)
+        do Screen.setColor(false);
+        let py = y1;
+        while (py < (y2 + 1)) {
+            let px = x1 + (py & 1);
+            while (px < (x2 + 1)) {
+                do Screen.drawPixel(px, py);
+                let px = px + 2;
+            }
+            let py = py + 1;
+        }
+        do Screen.setColor(true);
+        return;
+    }
+
+    /**
+     * Draws a vertical gradient band from dark (top) to light (bottom).
+     * Uses 3 dithering densities: 75% → 50% → 25%.
+     * Each band occupies height/3 rows.
+     */
+    function void drawGradientV(int x1, int y1, int x2, int y2) {
+        var int bandH;
+        var int y1b;
+        var int y2b;
+
+        let bandH = (y2 - y1) / 3;
+        if (bandH < 1) { let bandH = 1; }
+
+        // Top band: 75% (dark)
+        let y1b = y1;
+        let y2b = y1 + bandH;
+        if (y2b > y2) { let y2b = y2; }
+        do Main.drawDithered75(x1, y1b, x2, y2b);
+
+        // Middle band: 50% (medium)
+        let y1b = y2b + 1;
+        let y2b = y1b + bandH;
+        if (y2b > y2) { let y2b = y2; }
+        if (y1b < (y2 + 1)) {
+            do Main.drawDitheredRect(x1, y1b, x2, y2b);
+        }
+
+        // Bottom band: 25% (light)
+        let y1b = y2b + 1;
+        if (y1b < (y2 + 1)) {
+            do Main.drawDithered25(x1, y1b, x2, y2);
+        }
+
+        return;
+    }
+
+    /**
+     * Draws the exit screen with block letters, mini chart, and credits.
+     */
+    function void drawExitScreen() {
+        do Screen.clearScreen();
+        do Screen.setColor(true);
+
+        // Top/bottom borders
+        do Screen.drawRectangle(0, 0, 511, 1);
+        do Screen.drawRectangle(0, 254, 511, 255);
+
+        // Dithered corner vignettes (25% density, subtle framing)
+        do Main.drawDithered25(0, 2, 60, 60);
+        do Main.drawDithered25(451, 2, 511, 60);
+        do Main.drawDithered25(0, 200, 60, 253);
+        do Main.drawDithered25(451, 200, 511, 253);
+
+        // "HT" monogram in block letters (centered)
+        // 2 letters × 24px + 1 gap × 8px = 56px, start at (512-56)/2 = 228
+        do Main.drawBlockLetter(228, 20, 72);   // H
+        do Main.drawBlockLetter(260, 20, 84);   // T
+
+        // Mini candlestick chart (3 candles, no volume bars)
+        do Main.drawCandle(210, 80, 5, 15, 35, 45, true, 0);
+        do Main.drawCandle(240, 80, 10, 20, 40, 50, false, 0);
+        do Main.drawCandle(270, 80, 0, 10, 30, 40, true, 0);
+        // X-axis for mini chart
+        do Screen.drawLine(205, 135, 285, 135);
+
+        // Dithered accent line below chart (50% density, horizontal bar)
+        do Main.drawDitheredRect(180, 140, 332, 143);
+
+        // Centered text
+        do Output.moveCursor(14, 19);
+        do Output.printString("Thanks for trading.");
+        do Output.moveCursor(16, 11);
+        do Output.printString("Built on 16-bit hardware, from NAND gates up.");
+        do Output.moveCursor(19, 18);
+        do Output.printString("Zarko Gvozdenovic (zarko@visaurum.nl), 2026");
+
+        return;
+    }
+}

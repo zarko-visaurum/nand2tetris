@@ -1,0 +1,90 @@
+# Multi-stage Containerfile for hack-assembler
+# Produces a minimal Alpine-based production image (~12MB)
+
+# ==============================================================================
+# Stage 1: Builder
+# ==============================================================================
+FROM rust:1.92-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY Cargo.toml ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+
+# Build release binary
+RUN cargo build --release
+
+# Run tests in builder
+RUN cargo test --release --lib --bins
+RUN cargo test --release --test fuzz_test
+
+# Verify binary
+RUN ./target/release/hack-assembler --help || true
+
+# ==============================================================================
+# Stage 2: Runtime
+# ==============================================================================
+FROM alpine:latest
+
+# Create non-root user for security
+RUN addgroup -g 1000 asmuser && \
+    adduser -D -u 1000 -G asmuser asmuser
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/hack-assembler /usr/local/bin/hack-assembler
+
+# Set ownership
+RUN chown asmuser:asmuser /usr/local/bin/hack-assembler && \
+    chmod +x /usr/local/bin/hack-assembler
+
+# Switch to non-root user
+USER asmuser
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Set volume for input/output files
+VOLUME ["/workspace"]
+
+# Set entrypoint
+ENTRYPOINT ["hack-assembler"]
+
+# Default command (show help)
+CMD ["--help"]
+
+# ==============================================================================
+# Metadata
+# ==============================================================================
+LABEL maintainer="nand2tetris student"
+LABEL version="1.2.0"
+LABEL description="High-performance Hack assembly to binary translator"
+LABEL project="nand2tetris Project 06"
+
+# ==============================================================================
+# Build Instructions
+# ==============================================================================
+# Build image:
+#   podman build -t hack-assembler:1.2.0 -f Containerfile .
+#
+# Run container:
+#   podman run --rm -v $(pwd):/workspace hack-assembler:1.2.0 input.asm
+#
+# Interactive shell:
+#   podman run --rm -it -v $(pwd):/workspace --entrypoint /bin/sh hack-assembler:1.2.0
+#
+# Batch mode:
+#   podman run --rm -v $(pwd):/workspace hack-assembler:1.2.0 *.asm
+#
+# Verbose mode:
+#   podman run --rm -v $(pwd):/workspace hack-assembler:1.2.0 -v input.asm
+#
+# Expected image size: ~12MB (Alpine base + static binary)
+# ==============================================================================

@@ -1,0 +1,26 @@
+See Chapter 13. It's your call!
+
+And, if you develop something cool, please let us know about it.
+
+We hope that you enjoyed the course!
+
+-- Noam and Shimon
+
+www.nand2tetris.org
+
+Žarko's call: High-Performance Hack Emulator
+
+The course emulator runs at ~50K instructions/second, making HackTrader's
+real-time market making impractical. The natural next step: build a
+high-performance Hack CPU + VM emulator targeting 500 MHz - 1 GHz throughput.
+
+Planned implementation:
+- Dual implementations in Rust 2024 and C++20/23
+- Threaded interpreter or AOT compilation
+- Latency instrumentation (P50/P99 histograms)
+- Deterministic replay for debugging
+- Optional: FPGA implementation on iCE40
+
+This extends the "NAND to Operating System" journey into "NAND to
+High-Performance Computing" — demonstrating that the hardware we built
+from first principles can run at practical speeds with proper engineering

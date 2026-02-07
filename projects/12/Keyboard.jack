@@ -1,0 +1,193 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/12/Keyboard.jack
+//
+// MIT License - Copyright (c) 2026 Žarko Gvozdenović (zarko@visaurum.nl)
+// See LICENSE for details.
+
+/**
+ * A library for handling user input from the keyboard.
+ *
+ * The Hack keyboard is memory-mapped at address 24576.
+ * When a key is pressed, its scan code appears at this address.
+ * When no key is pressed, the value is 0.
+ *
+ * Implementation:
+ * - Direct memory-mapped I/O (no polling overhead)
+ * - Busy-wait for key press/release
+ * - Echo characters to screen via Output
+ * - Backspace handling in readLine
+ *
+ * Key codes:
+ *   ASCII printable: 32-126
+ *   newline: 128
+ *   backspace: 129
+ *   arrows: 130-133 (left, up, right, down)
+ *   home/end: 134-135
+ *   page up/down: 136-137
+ *   insert/delete: 138-139
+ *   ESC: 140
+ *   F1-F12: 141-152
+ */
+class Keyboard {
+    // Memory-mapped keyboard address
+    static int KEYBOARD_ADDR;
+
+    /**
+     * Initializes the keyboard.
+     *
+     * Time: O(1)
+     */
+    function void init() {
+        let KEYBOARD_ADDR = 24576;
+        return;
+    }
+
+    /**
+     * Returns the character of the currently pressed key on the keyboard;
+     * if no key is currently pressed, returns 0.
+     *
+     * Recognizes all ASCII characters, as well as the following keys:
+     * new line = 128 = String.newline()
+     * backspace = 129 = String.backspace()
+     * left arrow = 130
+     * up arrow = 131
+     * right arrow = 132
+     * down arrow = 133
+     * home = 134
+     * End = 135
+     * page up = 136
+     * page down = 137
+     * insert = 138
+     * delete = 139
+     * ESC = 140
+     * F1 - F12 = 141 - 152
+     *
+     * @return Current key scan code, or 0 if no key pressed
+     *
+     * Time: O(1)
+     */
+    function char keyPressed() {
+        return Memory.peek(KEYBOARD_ADDR);
+    }
+
+    /**
+     * Waits until a key is pressed on the keyboard and released,
+     * then echoes the key to the screen, and returns the character
+     * of the pressed key.
+     *
+     * Algorithm:
+     * 1. Busy-wait until a key is pressed (keyPressed != 0)
+     * 2. Store the key code
+     * 3. Busy-wait until the key is released (keyPressed = 0)
+     * 4. Echo the character to the screen
+     * 5. Return the key code
+     *
+     * @return Character code of the pressed key
+     *
+     * Time: O(user input time)
+     */
+    function char readChar() {
+        var char key;
+
+        // Wait for key press
+        while (Keyboard.keyPressed() = 0) {
+            // Busy wait
+        }
+
+        // Capture the key
+        let key = Keyboard.keyPressed();
+
+        // Wait for key release
+        while (~(Keyboard.keyPressed() = 0)) {
+            // Busy wait
+        }
+
+        // Echo to screen (printable characters only)
+        do Output.printChar(key);
+
+        return key;
+    }
+
+    /**
+     * Displays the message on the screen, reads from the keyboard the entered
+     * text until a newline character is detected, echoes the text to the screen,
+     * and returns its value. Also handles user backspaces.
+     *
+     * Algorithm:
+     * 1. Print the prompt message
+     * 2. Create a String buffer (max 64 characters - one line)
+     * 3. Loop: read characters until newline (128)
+     *    - If backspace (129) and string not empty: erase last char
+     *    - Otherwise: append character to string
+     * 4. Print newline and return the string
+     *
+     * @param message Prompt to display
+     * @return String containing user input (caller must dispose)
+     *
+     * Note: Input is limited to 64 characters (one screen line).
+     *       Characters beyond this limit are silently ignored.
+     *
+     * Time: O(user input time)
+     * Space: Allocates String of length 64
+     */
+    function String readLine(String message) {
+        var String line;
+        var char key;
+
+        // Display prompt
+        do Output.printString(message);
+
+        // Allocate buffer (max 64 chars = one screen line)
+        let line = String.new(64);
+
+        while (true) {
+            let key = Keyboard.readChar();
+
+            if (key = String.newLine()) {
+                // Enter pressed - done
+                do Output.println();
+                return line;
+            }
+
+            if (key = String.backSpace()) {
+                // Backspace - erase if possible
+                if (line.length() > 0) {
+                    do line.eraseLastChar();
+                    // Note: Output.printChar already handled the visual backspace
+                }
+            } else {
+                // Regular character - append if room
+                if (line.length() < 64) {
+                    do line.appendChar(key);
+                }
+            }
+        }
+
+        // Unreachable, but Jack requires return
+        return line;
+    }
+
+    /**
+     * Displays the message on the screen, reads from the keyboard the entered
+     * text until a newline character is detected, echoes the text to the screen,
+     * and returns its integer value (until the first non-digit character in the
+     * entered text is detected). Also handles user backspaces.
+     *
+     * @param message Prompt to display
+     * @return Integer value parsed from input
+     *
+     * Time: O(user input time)
+     */
+    function int readInt(String message) {
+        var String line;
+        var int value;
+
+        let line = Keyboard.readLine(message);
+        let value = line.intValue();
+        do line.dispose();
+
+        return value;
+    }
+}

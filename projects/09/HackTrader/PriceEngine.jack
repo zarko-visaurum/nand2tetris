@@ -1,0 +1,164 @@
+/**
+ * PriceEngine - Simulates underlying asset price movement.
+ *
+ * Models a geometric random walk with drift, generating realistic
+ * price dynamics for the options market making game.
+ *
+ * Price convention: fixed-point x10 (e.g., 1050 = 105.0)
+ *
+ * The random walk uses:
+ *   price_new = price_old + drift + volatility * Z
+ * where Z ~ N(0,1) approximated via Central Limit Theorem.
+ *
+ * Difficulty levels control volatility and drift parameters.
+ *
+ * Copyright 2026 Žarko Gvozdenović (zarko@visaurum.nl). MIT License.
+ */
+class PriceEngine {
+    field int currentPrice;    // Current spot price (x10)
+    field int previousPrice;   // Previous tick price (x10)
+    field int drift;           // Per-tick drift (x10, typically 0-1)
+    field int volatility;      // Per-tick volatility scale (1-10)
+    field int tickCount;       // Number of ticks elapsed
+    field int minPrice;        // Price floor (x10)
+    field int maxPrice;        // Price ceiling (x10)
+    field RNG rng;             // Random number generator
+
+    // --- Price Bounds ---
+    static int PRICE_FLOOR;        // Minimum allowed price (x10)
+    static int PRICE_CEILING;      // Maximum allowed price (x10)
+    static int VOL_SCALE_DIVISOR;  // Divisor for volatility * noise scaling
+
+    /**
+     * Constructs a PriceEngine with given parameters.
+     *
+     * @param startPrice Initial price (x10, e.g., 1000 = 100.0)
+     * @param vol Volatility scale (1=low, 5=medium, 10=high)
+     * @param d Drift per tick (x10, e.g., 0 for no drift)
+     * @param random RNG instance (shared with game)
+     */
+    constructor PriceEngine new(int startPrice, int vol, int d, RNG random) {
+        let PRICE_FLOOR = 500;
+        let PRICE_CEILING = 2000;
+        let VOL_SCALE_DIVISOR = 128;
+
+        let currentPrice = startPrice;
+        let previousPrice = startPrice;
+        let drift = d;
+        let volatility = vol;
+        let tickCount = 0;
+        let minPrice = PRICE_FLOOR;
+        let maxPrice = PRICE_CEILING;
+        let rng = random;
+        return this;
+    }
+
+    /** Disposes this PriceEngine. Does not dispose shared RNG. */
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /**
+     * Advances the price by one tick.
+     * Generates a random price move based on volatility.
+     * Enforces min/max price bounds with reflection.
+     */
+    method void tick() {
+        var int move;
+        var int noise;
+
+        let previousPrice = currentPrice;
+        let tickCount = tickCount + 1;
+
+        // Generate Gaussian noise using CLT (sum of uniforms)
+        // rng.nextGaussian() returns ~N(0, ~128) range [-256, 256]
+        let noise = rng.nextGaussian();
+
+        // Scale noise by volatility: move = drift + (vol * noise) / 128
+        // This gives moves proportional to volatility setting
+        let move = drift + ((volatility * noise) / VOL_SCALE_DIVISOR);
+
+        // Apply move
+        let currentPrice = currentPrice + move;
+
+        // Enforce price bounds with reflection
+        if (currentPrice < minPrice) {
+            let currentPrice = minPrice + (minPrice - currentPrice);
+        }
+        if (currentPrice > maxPrice) {
+            let currentPrice = maxPrice - (currentPrice - maxPrice);
+        }
+
+        // Final safety clamp
+        if (currentPrice < minPrice) {
+            let currentPrice = minPrice;
+        }
+        if (currentPrice > maxPrice) {
+            let currentPrice = maxPrice;
+        }
+
+        return;
+    }
+
+    /** Returns current price (x10). */
+    method int getPrice() {
+        return currentPrice;
+    }
+
+    /** Returns previous tick price (x10). */
+    method int getPreviousPrice() {
+        return previousPrice;
+    }
+
+    /** Returns the last price change (x10, can be negative). */
+    method int getReturn() {
+        return currentPrice - previousPrice;
+    }
+
+    /** Returns total ticks elapsed. */
+    method int getTickCount() {
+        return tickCount;
+    }
+
+    /** Returns current volatility setting. */
+    method int getVolatility() {
+        return volatility;
+    }
+
+    /** Sets a new volatility level (for difficulty changes). */
+    method void setVolatility(int vol) {
+        let volatility = vol;
+        return;
+    }
+
+    /** Sets the drift parameter. */
+    method void setDrift(int d) {
+        let drift = d;
+        return;
+    }
+
+    /**
+     * Generates a "jump" event — a large sudden price move.
+     * Used for adverse selection scenarios in harder difficulties.
+     *
+     * @param magnitude Size of jump in price units (x10)
+     */
+    method void jump(int magnitude) {
+        let previousPrice = currentPrice;
+        if (rng.nextInRange(2) = 0) {
+            let currentPrice = currentPrice + magnitude;
+        } else {
+            let currentPrice = currentPrice - magnitude;
+        }
+
+        // Enforce bounds
+        if (currentPrice < minPrice) {
+            let currentPrice = minPrice;
+        }
+        if (currentPrice > maxPrice) {
+            let currentPrice = maxPrice;
+        }
+        return;
+    }
+}

@@ -1,0 +1,90 @@
+# Multi-stage Containerfile for jack-analyzer
+# Produces a minimal Alpine-based production image (~12MB)
+
+# ==============================================================================
+# Stage 1: Builder
+# ==============================================================================
+FROM rust:1.92-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    pkgconfig
+
+# Set working directory
+WORKDIR /build
+
+# Copy source code
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY tests/ ./tests/
+
+# Build release binary
+RUN cargo build --release --locked
+
+# Run tests in builder (exclude integration tests that need external .jack files)
+RUN cargo test --release --lib --bins
+RUN cargo test --release --test fuzz_test
+
+# Verify binary
+RUN ./target/release/JackAnalyzer --help || true
+
+# ==============================================================================
+# Stage 2: Runtime
+# ==============================================================================
+FROM alpine:latest
+
+# Create non-root user for security
+RUN addgroup -g 1000 jackuser && \
+    adduser -D -u 1000 -G jackuser jackuser
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/JackAnalyzer /usr/local/bin/JackAnalyzer
+
+# Set ownership
+RUN chown jackuser:jackuser /usr/local/bin/JackAnalyzer && \
+    chmod +x /usr/local/bin/JackAnalyzer
+
+# Switch to non-root user
+USER jackuser
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Set volume for input/output files
+VOLUME ["/workspace"]
+
+# Set entrypoint
+ENTRYPOINT ["JackAnalyzer"]
+
+# Default command (show help)
+CMD ["--help"]
+
+# ==============================================================================
+# Metadata
+# ==============================================================================
+LABEL maintainer="nand2tetris student"
+LABEL version="1.0.3"
+LABEL description="Syntax analyzer for the Jack programming language"
+LABEL project="nand2tetris Project 10"
+
+# ==============================================================================
+# Build Instructions
+# ==============================================================================
+# Build image:
+#   podman build -t jack-analyzer:1.0.3 -f Containerfile .
+#
+# Run container:
+#   podman run --rm -v $(pwd):/workspace jack-analyzer:1.0.3 Main.jack
+#
+# Interactive shell:
+#   podman run --rm -it -v $(pwd):/workspace --entrypoint /bin/sh jack-analyzer:1.0.3
+#
+# Directory mode (multiple .jack files -> XML output):
+#   podman run --rm -v $(pwd):/workspace jack-analyzer:1.0.3 /workspace/Square/
+#
+# Single file mode:
+#   podman run --rm -v $(pwd):/workspace jack-analyzer:1.0.3 Main.jack
+#
+# Expected image size: ~12MB (Alpine base + static binary)
+# ==============================================================================
