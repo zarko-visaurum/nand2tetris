@@ -1,4 +1,4 @@
-# nand2tetris: From NAND Gates to Operating System
+# nand2hacktrader: From NAND Gates to Operating System
 
 [![CI](https://github.com/zarko-visaurum/nand2tetris-i-ii/actions/workflows/ci.yml/badge.svg)](https://github.com/zarko-visaurum/nand2tetris-i-ii/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
